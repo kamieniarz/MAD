@@ -11,7 +11,7 @@ $(document).ready(function () {
     $(".delete").click(function() {
         if(confirm('Are you sure you want to delete this resource?')) {
             var elem =  $(this);
-            $.blockUI({ message: '<img src="{{ url_for('static', filename='loading.gif') }}" width="100px" /><br /><h2>Deleting a {{ subtab }}...</h2>' });
+            loadingBlockUI('Deleting a  {{ subtab }}' )
             $.ajax({
                 url : '{{ base_uri }}/'+ $(this).data('identifier'),
                 type : 'DELETE',
@@ -26,7 +26,7 @@ $(document).ready(function () {
                         var dependencies = data.responseJSON;
                         var msg = 'The following entities have a dependency on this element:';
                         $.each(dependencies, function() {
-                            msg += "\n"+ this['name'] +" ("+ this['uri'] +")";
+                            msg += "\n"+ this['name'];
                         });
                         alert(msg);
                     } else {
@@ -55,10 +55,8 @@ $(document).ready(function () {
 {{ super() }}
 <div class="row">
   <div class="col">
-    <div class="card border-secondary">
-      <div class="card-body py-2">
-        <p class="card-text">These authentication users are used to secure your MAD setup. Once configured, every device connecting to your server via RemoteGPSController or PogoDroid must submit a valid username including the specified password in order to communicate with MAD. Auth users can be used on multiple devices at the same time.</p>
-      </div>
+    <div class="alert alert-primary">
+      These authentication users are used to secure your MAD setup. Once configured, every device connecting to your server via RemoteGPSController or PogoDroid must submit a valid username including the specified password in order to communicate with MAD. Auth users can be used on multiple devices at the same time.
     </div>
   </div>
 </div>

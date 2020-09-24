@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
-
 from mapadroid.db.PooledQueryExecutor import PooledQueryExecutor
-from mapadroid.utils.logging import logger
+from mapadroid.utils.logging import get_logger, LoggerEnums
+
+
+logger = get_logger(LoggerEnums.database)
 
 
 class DbWebhookReader:
@@ -11,14 +13,14 @@ class DbWebhookReader:
         # TODO: DbWrapper is currently required because `dbWrapper.quests_from_db` is shared between
         # map and webhook. Old typehinting used to avoid circular dependencies. This should be
         # resolved in future iterations.
-        self._db_wrapper = db_wrapper  # type: db.DbWrapper
+        self._db_wrapper = db_wrapper
 
     def get_raids_changed_since(self, timestamp):
-        logger.debug("DbWebhookReader::get_raids_changed_since called")
+        logger.debug2("DbWebhookReader::get_raids_changed_since called")
         query = (
             "SELECT raid.gym_id, raid.level, raid.spawn, raid.start, raid.end, raid.pokemon_id, "
             "raid.cp, raid.move_1, raid.move_2, raid.last_scanned, raid.form, raid.is_exclusive, raid.gender, "
-            "raid.costume, gymdetails.name, gymdetails.url, gym.latitude, gym.longitude, "
+            "raid.costume, raid.evolution, gymdetails.name, gymdetails.url, gym.latitude, gym.longitude, "
             "gym.team_id, weather_boosted_condition, gym.is_ex_raid_eligible "
             "FROM raid "
             "LEFT JOIN gymdetails ON gymdetails.gym_id = raid.gym_id "
@@ -31,7 +33,7 @@ class DbWebhookReader:
         ret = []
         for (gym_id, level, spawn, start, end, pokemon_id,
              cp, move_1, move_2, last_scanned, form, is_exclusive, gender,
-             costume, name, url, latitude, longitude, team_id,
+             costume, evolution, name, url, latitude, longitude, team_id,
              weather_boosted_condition, is_ex_raid_eligible) in res:
             ret.append({
                 "gym_id": gym_id,
@@ -54,12 +56,13 @@ class DbWebhookReader:
                 "is_exclusive": is_exclusive,
                 "gender": gender,
                 "is_ex_raid_eligible": is_ex_raid_eligible,
-                "costume": costume
+                "costume": costume,
+                "evolution": evolution
             })
         return ret
 
     def get_weather_changed_since(self, timestamp):
-        logger.debug("DbWebhookReader::get_weather_changed_since called")
+        logger.debug2("DbWebhookReader::get_weather_changed_since called")
         query = (
             "SELECT * "
             "FROM weather "
@@ -91,11 +94,11 @@ class DbWebhookReader:
         return ret
 
     def get_quests_changed_since(self, timestamp):
-        logger.debug("DbWebhookReader::get_quests_changed_since called")
+        logger.debug2("DbWebhookReader::get_quests_changed_since called")
         return self._db_wrapper.quests_from_db(timestamp=timestamp)
 
     def get_gyms_changed_since(self, timestamp):
-        logger.debug("DbWebhookReader::get_gyms_changed_since called")
+        logger.debug2("DbWebhookReader::get_gyms_changed_since called")
         query = (
             "SELECT name, description, url, gym.gym_id, team_id, guard_pokemon_id, slots_available, "
             "latitude, longitude, total_cp, is_in_battle, weather_boosted_condition, "
@@ -131,7 +134,7 @@ class DbWebhookReader:
         return ret
 
     def get_stops_changed_since(self, timestamp):
-        logger.debug("DbWebhookReader::get_stops_changed_since called")
+        logger.debug2("DbWebhookReader::get_stops_changed_since called")
         query = (
             "SELECT pokestop_id, latitude, longitude, lure_expiration, name, image, active_fort_modifier, "
             "last_modified, last_updated, incident_start, incident_expiration, incident_grunt_type "
@@ -167,12 +170,12 @@ class DbWebhookReader:
         return ret
 
     def get_mon_changed_since(self, timestamp):
-        logger.debug("DbWebhookReader::get_mon_changed_since called")
+        logger.debug2("DbWebhookReader::get_mon_changed_since called")
         query = (
             "SELECT encounter_id, spawnpoint_id, pokemon_id, pokemon.latitude, pokemon.longitude, "
             "disappear_time, individual_attack, individual_defense, individual_stamina, "
             "move_1, move_2, cp, cp_multiplier, weight, height, gender, form, costume, "
-            "weather_boosted_condition, last_modified, "
+            "weather_boosted_condition, last_modified, catch_prob_1, catch_prob_2, catch_prob_3, "
             "(trs_spawn.calc_endminsec IS NOT NULL) AS verified "
             "FROM pokemon "
             "INNER JOIN trs_spawn ON pokemon.spawnpoint_id = trs_spawn.spawnpoint "
@@ -186,7 +189,8 @@ class DbWebhookReader:
              longitude, disappear_time, individual_attack,
              individual_defense, individual_stamina, move_1, move_2,
              cp, cp_multiplier, weight, height, gender, form, costume,
-             weather_boosted_condition, last_modified, verified) in res:
+             weather_boosted_condition, last_modified, catch_prob_1, catch_prob_2, catch_prob_3,
+             verified) in res:
             ret.append({
                 "encounter_id": encounter_id,
                 "pokemon_id": pokemon_id,
@@ -208,6 +212,9 @@ class DbWebhookReader:
                 "height": height,
                 "weight": weight,
                 "weather_boosted_condition": weather_boosted_condition,
+                "base_catch": catch_prob_1,
+                "great_catch": catch_prob_2,
+                "ultra_catch": catch_prob_3,
                 "spawn_verified": verified == 1
             })
         return ret

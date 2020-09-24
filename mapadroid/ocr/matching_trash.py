@@ -1,33 +1,34 @@
 import os
 from typing import List
-
 import cv2
 import imutils
 import numpy as np
-
 import mapadroid
 from mapadroid.utils.collections import Trash
-from mapadroid.utils.logging import logger
+from mapadroid.utils.logging import get_logger, LoggerEnums, get_origin_logger
 
 
-def get_delete_quest_coords(x):
-    click_x = int(x) / 1.07
+logger = get_logger(LoggerEnums.ocr)
+
+
+def get_delete_quest_coords(coord_x):
+    click_x = int(coord_x) / 1.07
     return click_x
 
 
-def get_delete_item_coords(x):
-    click_x = int(x) / 1.09
+def get_delete_item_coords(coord_x):
+    click_x = int(coord_x) / 1.09
     return click_x
 
 
-def trash_image_matching(screen_img, full_screen):
+def trash_image_matching(origin, screen_img, full_screen):
+    origin_logger = get_origin_logger(logger, origin=origin)
     clicklist: List[Trash] = []
     screen = cv2.imread(screen_img)
-    # print (screen.shape[:2])
     screen = cv2.cvtColor(screen, cv2.COLOR_BGR2GRAY)
 
     if screen is None:
-        logger.error('trash_image_matching: {} appears to be corrupted', str(screen_img))
+        origin_logger.error('trash_image_matching: {} appears to be corrupted', screen_img)
         return None
 
     trash = cv2.imread(os.path.join(mapadroid.MAD_ROOT, 'static/img/trashcan.png'), 0)
@@ -59,7 +60,7 @@ def trash_image_matching(screen_img, full_screen):
 
         resized = imutils.resize(
             trash, width=int(trash.shape[1] * scale))
-        (tH, tW) = resized.shape[:2]
+        (trash_heigh, trash_width) = resized.shape[:2]
 
         last_y_coord = 0
         res = cv2.matchTemplate(screen, resized, cv2.TM_CCOEFF_NORMED)
@@ -71,8 +72,8 @@ def trash_image_matching(screen_img, full_screen):
             if full_screen:
                 screen_height_max = height
             if pt[0] > width / 4 * 3 and pt[1] < screen_height_max:
-                x_coord = int(pt[0] + tW / 2)
-                y_coord = int(pt[1] + tH / 2)
+                x_coord = int(pt[0] + trash_width / 2)
+                y_coord = int(pt[1] + trash_heigh / 2)
 
                 if last_y_coord > 0:
                     if last_y_coord + 100 > y_coord or last_y_coord - 100 > y_coord:
@@ -84,18 +85,12 @@ def trash_image_matching(screen_img, full_screen):
                                 (_quest_x - 50 < x_coord < _quest_x + 50):
                             clicklist.append(Trash(x_coord, y_coord))
                             last_y_coord = y_coord
-                            # cv2.rectangle(screen, pt, (pt[0] + tW, pt[1] + tH), (128, 128, 128), 2)
                 else:
                     if (_inventory_x - 50 < x_coord < _inventory_x + 50) or \
                             (_quest_x - 50 < x_coord < _quest_x + 50):
                         clicklist.append(Trash(x_coord, y_coord))
                         last_y_coord = y_coord
-                        # cv2.rectangle(screen, pt, (pt[0] + tW, pt[1] + tH), (128, 128, 128), 2)
                 boxcount += 1
-
-        # cv2.namedWindow("output", cv2.WINDOW_KEEPRATIO)
-        # cv2.imshow("output", screen)
-        # cv2.waitKey(0)
 
         if boxcount >= 1:
             break

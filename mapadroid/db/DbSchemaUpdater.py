@@ -1,8 +1,10 @@
 import sys
-
 from mapadroid.db.PooledQueryExecutor import PooledQueryExecutor
-from mapadroid.utils.logging import logger
 from . import madmin_conversion
+from mapadroid.utils.logging import get_logger, LoggerEnums
+
+
+logger = get_logger(LoggerEnums.database)
 
 
 class DbSchemaUpdater:
@@ -130,15 +132,31 @@ class DbSchemaUpdater:
                      )
         },
         {
-            "table": "trs_stats_detect_raw",
+            "table": "trs_stats_detect_mon_raw",
             "spec": ("`id` int(11) AUTO_INCREMENT, "
                      "`worker` varchar(100) NOT NULL, "
-                     "`type_id` varchar(100) NOT NULL, "
+                     "`encounter_id` bigint(20) unsigned NOT NULL, "
+                     "`type` varchar(10) NOT NULL, "
+                     "`count` int(11) NOT NULL, "
+                     "`is_shiny` tinyint(1) NOT NULL DEFAULT 0, "
+                     "`timestamp_scan` int(11) NOT NULL, "
+                     "PRIMARY KEY (`id`), "
+                     "KEY `worker` (`worker`), "
+                     "KEY `encounter_id` (`encounter_id`), "
+                     "KEY `is_shiny` (`is_shiny`)"
+                     )
+        },
+        {
+            "table": "trs_stats_detect_fort_raw",
+            "spec": ("`id` int(11) AUTO_INCREMENT, "
+                     "`worker` varchar(100) NOT NULL, "
+                     "`guid` varchar(50) NOT NULL, "
                      "`type` varchar(10) NOT NULL, "
                      "`count` int(11) NOT NULL, "
                      "`timestamp_scan` int(11) NOT NULL, "
                      "PRIMARY KEY (`id`), "
-                     "KEY `worker` (`worker`)"
+                     "KEY `worker` (`worker`), "
+                     "KEY `guid` (`guid`)"
                      )
         },
         {
@@ -171,6 +189,11 @@ class DbSchemaUpdater:
             "table": "raid",
             "column": "costume",
             "ctype": "tinyint(1) NULL"
+        },
+        {
+            "table": "raid",
+            "column": "evolution",
+            "ctype": "smallint(6) NULL"
         },
         {
             "table": "gym",
@@ -259,8 +282,7 @@ class DbSchemaUpdater:
     def create_column(self, column_mod: dict):
         alter_query = (
             "ALTER TABLE {} "
-            "ADD COLUMN {} {}"
-                .format(column_mod["table"], column_mod["column"], column_mod["ctype"])
+            "ADD COLUMN {} {}".format(column_mod["table"], column_mod["column"], column_mod["ctype"])
         )
         if "modify_key" in column_mod:
             alter_query = alter_query + ", " + column_mod["modify_key"]
@@ -274,12 +296,12 @@ class DbSchemaUpdater:
             "AND column_name = %s "
             "AND table_schema = %s"
         )
-        vals = (
+        insert_values = (
             table,
             column,
             self._database,
         )
-        return int(self._db_exec.execute(query, vals)[0][0]) == 1
+        return int(self._db_exec.execute(query, insert_values)[0][0]) == 1
 
     def check_index_exists(self, table: str, index: str) -> bool:
         query = (
@@ -289,15 +311,14 @@ class DbSchemaUpdater:
             "AND index_name = %s "
             "AND table_schema = %s"
         )
-        vals = (
+        insert_values = (
             table,
             index,
             self._database,
         )
-        return int(self._db_exec.execute(query, vals)[0][0]) >= 1
+        return int(self._db_exec.execute(query, insert_values)[0][0]) >= 1
 
     def create_madmin_databases_if_not_exists(self):
-        logger.debug("DbWrapperBase::create_madmin_databases_if_not_exists called")
         for table in madmin_conversion.TABLES:
             self._db_exec.execute(table, commit=True)
 

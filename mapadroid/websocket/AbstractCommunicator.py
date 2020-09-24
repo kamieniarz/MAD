@@ -20,6 +20,10 @@ class AbstractCommunicator(ABC):
         pass
 
     @abstractmethod
+    def install_bundle(self, timeout: float, filepath: str = None, data=None) -> bool:
+        pass
+
+    @abstractmethod
     def start_app(self, package_name: str) -> bool:
         pass
 
@@ -60,7 +64,7 @@ class AbstractCommunicator(ABC):
         pass
 
     @abstractmethod
-    def click(self, x: int, y: int) -> bool:
+    def click(self, click_x: int, click_y: int) -> bool:
         pass
 
     @abstractmethod
@@ -116,14 +120,6 @@ class AbstractCommunicator(ABC):
         pass
 
     @abstractmethod
-    def enter_button(self) -> bool:
-        """
-        Keyevent 61
-        :return:
-        """
-        pass
-
-    @abstractmethod
     def enter_text(self, text: str) -> bool:
         pass
 
@@ -168,3 +164,14 @@ class AbstractCommunicator(ABC):
         :return:
         """
         pass
+
+    @abstractmethod
+    def get_compressed_logcat(self, path: str) -> bool:
+        """
+
+        Args:
+            path: The path to store the compressed logcat at (will be a zip file)
+
+        Returns:
+
+        """

@@ -1,19 +1,22 @@
 from mapadroid.route.RouteManagerBase import RouteManagerBase
-from mapadroid.utils.logging import logger
+from mapadroid.utils.logging import get_logger, LoggerEnums
+
+
+logger = get_logger(LoggerEnums.routemanager)
 
 
 class RouteManagerRaids(RouteManagerBase):
     def __init__(self, db_wrapper, dbm, area_id, coords, max_radius, max_coords_within_radius,
                  path_to_include_geofence,
                  path_to_exclude_geofence, routefile, mode=None, settings=None, init=False,
-                 name="unknown", joinqueue=None, useS2: bool = False, S2level: int = 15):
+                 name="unknown", joinqueue=None, use_s2: bool = False, s2_level: int = 15):
         RouteManagerBase.__init__(self, db_wrapper=db_wrapper, dbm=dbm, area_id=area_id, coords=coords,
                                   max_radius=max_radius,
                                   max_coords_within_radius=max_coords_within_radius,
                                   path_to_include_geofence=path_to_include_geofence,
                                   path_to_exclude_geofence=path_to_exclude_geofence,
                                   routefile=routefile, init=init,
-                                  name=name, settings=settings, mode=mode, useS2=True, S2level=S2level,
+                                  name=name, settings=settings, mode=mode, use_s2=True, s2_level=s2_level,
                                   joinqueue=joinqueue
                                   )
 
@@ -42,7 +45,7 @@ class RouteManagerRaids(RouteManagerBase):
         coords = self.db_wrapper.gyms_from_db(self.geofence_helper)
         including_stops = self._data_manager.get_resource('area', self.area_id).get('including_stops', False)
         if including_stops:
-            logger.info("Include stops in coords list too!")
+            self.logger.info("Include stops in coords list too!")
             coords.extend(self.db_wrapper.stops_from_db(self.geofence_helper))
 
         return coords
@@ -58,20 +61,18 @@ class RouteManagerRaids(RouteManagerBase):
         try:
             if not self._is_started:
                 self._is_started = True
-                logger.info("Starting routemanager {}", str(self.name))
+                self.logger.info("Starting routemanager")
                 if self.mode != "idle":
                     self._start_priority_queue()
                     self._start_check_routepools()
                     self._init_route_queue()
-
-                self._first_round_finished = False
         finally:
             self._manager_mutex.release()
 
         return True
 
     def _quit_route(self):
-        logger.info("Shutdown Route {}", str(self.name))
+        self.logger.info("Shutdown Route")
         self._is_started = False
         self._round_started_time = None
 

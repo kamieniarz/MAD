@@ -1,7 +1,8 @@
 import flask
-
+from threading import current_thread
 from mapadroid.madmin.functions import auth_required
 from . import apiResponse, apiRequest, apiException, global_variables
+from mapadroid.mad_apk import AbstractAPKStorage
 
 
 class APIHandler(object):
@@ -16,7 +17,8 @@ class APIHandler(object):
         ws_server (websocketserver): WebSocket server
     """
 
-    def __init__(self, logger, app, api_base, data_manager, mapping_manager, ws_server, config_mode):
+    def __init__(self, logger, app, api_base, data_manager, mapping_manager, ws_server, config_mode,
+                 storage_obj: AbstractAPKStorage, args):
         self._logger = logger
         self._app = app
         self._base = api_base
@@ -24,13 +26,14 @@ class APIHandler(object):
         self.dbc = self._data_manager.dbc
         self._mapping_manager = mapping_manager
         self._ws_server = ws_server
-        self._instance = self._data_manager.instance_id
         self._config_mode = config_mode
         self.api_req = None
+        self.storage_obj = storage_obj
+        self._args = args
         self.create_routes()
 
     def create_routes(self):
-        """ 
+        """
         Defines all routes required for the objects.  This must be implemented for each endpoint so the API
         can process requests
         """
@@ -60,16 +63,20 @@ class APIHandler(object):
         """
         # Begin processing the request
         self.api_req = apiRequest.APIRequest(self._logger, flask.request)
+        current_thread().name = 'madmin-api'
         try:
             self.api_req()
             processed_data = self.process_request(*args, **kwargs)
-            if type(processed_data) is flask.Response:
+            try:
+                response_data = processed_data[0]
+                status_code = processed_data[1]
+            except TypeError:
+                if processed_data is None:
+                    raise
                 return processed_data
-            response_data = processed_data[0]
-            status_code = processed_data[1]
             try:
                 resp_args = processed_data[2]
-            except:
+            except IndexError:
                 resp_args = {}
             return apiResponse.APIResponse(self._logger, self.api_req)(response_data, status_code,
                                                                        **resp_args)
@@ -77,11 +84,13 @@ class APIHandler(object):
             headers = {
                 'X-Status': 'Support Content-Types: %s' % (sorted(global_variables.SUPPORTED_FORMATS))
             }
-            return apiResponse.APIResponse(self._logger, self.api_req)(None, 422, headers=headers)
+            self._logger.debug2('Invalid content-type received: {}', flask.request.headers.get('Content-Type'))
+            return apiResponse.APIResponse(self._logger, self.api_req)(None, 415, headers=headers)
         except apiException.FormattingError as err:
             headers = {
                 'X-Status': err.reason
             }
+            self._logger.debug2('Formatting error: {}', headers)
             return apiResponse.APIResponse(self._logger, self.api_req)(None, 422, headers=headers)
         except Exception:
             self._logger.opt(exception=True).critical("An unhanded exception occurred!")

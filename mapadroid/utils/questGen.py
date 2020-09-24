@@ -44,6 +44,14 @@ def generate_quest(quest):
         pokemon_costume = quest['quest_pokemon_costume_id']
         if pokemon_form != '00':
             pokemon_asset_bundle = form_mapper(int(pokemon_id), pokemon_form)
+    elif quest_reward_type == _('Energy'):
+        item_type = _('Mega Energy')
+        if quest['quest_pokemon_id'] and int(quest['quest_pokemon_id']) > 0:
+            pokemon_name = i8ln(pokemonname(str(quest['quest_pokemon_id'])))
+            pokemon_id = quest['quest_pokemon_id']
+        else:
+            pokemon_name = ''
+        item_amount = quest['quest_item_amount']
 
     if not quest['task']:
         quest_task = questtask(
@@ -79,29 +87,22 @@ def generate_quest(quest):
     return quest_raw
 
 
-def extractForm(quest_reward_json):
-    quest_reward = json.loads(quest_reward_json)
-
-    if len(quest_reward) == 0:
-        return 0
-
-    if "pokemon_encounter" in quest_reward[0]:
-        encounter = quest_reward[0]["pokemon_encounter"]
-        return encounter["pokemon_display"]["form_value"]
-
-
 def questreward(quest_reward_type):
     type = {
         2: _("Item"),
         3: _("Stardust"),
-        7: _("Pokemon")
+        7: _("Pokemon"),
+        12: _("Energy")
     }
     return type.get(quest_reward_type, "nothing")
 
 
 def questtype(quest_type):
     file = open_json_file('types')
-    return (file[str(quest_type)]['text'])
+    if str(quest_type) in file:
+        return file[str(quest_type)]['text']
+
+    return "Unknown quest type placeholder: {0}"
 
 
 def rewarditem(itemid):
@@ -189,6 +190,8 @@ def questtask(typeid, condition, target, quest_template):
                 text = _('Win a level 3 or higher raid')
             if re.search(r'"raid_level": \[2, 3, 4, 5\]', condition) is not None:
                 text = _('Win a level 2 or higher raid')
+            if re.search(r'"raid_level": \[6\]', condition) is not None:
+                text = _('Win a Mega raid')
         else:
             text = _("Battle in {0} Raids")
     elif typeid == 10:
@@ -204,19 +207,23 @@ def questtask(typeid, condition, target, quest_template):
                 1)]['name'].replace(_(' Berry'), '') + " "
     elif typeid == 14:
         text = _('Power up Pokemon {0} times')
-    elif typeid == 15:
-        text = _("Evolve {0} Pokemon")
+    elif typeid == 15 or typeid == 43:
+        arr['mega'] = ""
+        text = _("{mega}Evolve {0} Pokemon")
+        if typeid == 43:
+            arr['mega'] = _("Mega ")
+
         for con in condition_dict:
             if con.get('type', 0) == 11:
-                text = _("Use an item to evolve {0} Pokemon")
+                text = _("Use an item to {mega}evolve {0} Pokemon")
                 # Try to find the exact evolution item needed
                 # [{"type": 11, "with_item": {"item": 1106}}]
                 with_item = con.get('with_item', {}).get('item', None)
                 if with_item is not None:
-                    text = _('Use {item} to evolve {0} Pokemon')
+                    text = _('Use {item} to {mega}evolve {0} Pokemon')
                     arr['item'] = items[str(with_item)]['name']
             if con.get('type', 0) == 1:
-                text = _("Evolve {0} {type}Pokemon")
+                text = _("{mega}Evolve {0} {type}Pokemon")
                 arr['wb'] = ""
                 arr['type'] = ""
                 arr['poke'] = ""
@@ -233,13 +240,12 @@ def questtask(typeid, condition, target, quest_template):
                             arr['type'] += (_('or ') if last == cur else '') + pokemonTypes[ty].title() + (
                                 _('-type ') if last == cur else '-, ')
                             cur += 1
-            if re.search(r'"type": 2', condition) is not None:
+            if con.get('type', 0) == 2:
                 arr['wb'] = ""
                 arr['type'] = ""
                 arr['poke'] = ""
 
-                match_object = re.search(
-                    r'"pokemon_ids": \[([0-9, ]+)\]', condition)
+                match_object = re.search(r'"pokemon_ids": \[([0-9, ]+)\]', condition)
                 if match_object is not None:
                     pt = match_object.group(1).split(', ')
                     last = len(pt)
@@ -251,7 +257,7 @@ def questtask(typeid, condition, target, quest_template):
                             arr['poke'] += (_('or ') if last == cur else '') + i8ln(pokemonname(ty)) + (
                                 '' if last == cur else ', ')
                             cur += 1
-                    text = _('Evolve {0} {poke}')
+                    text = _('{mega}Evolve {0} {poke}')
     elif typeid == 16:
         arr['inrow'] = ""
         arr['curve'] = ""
@@ -283,11 +289,30 @@ def questtask(typeid, condition, target, quest_template):
     elif typeid == 24:
         text = _('Send {0} gifts to friends')
     elif typeid == 27:
-        # PVP against trainer or team leader.
-        if re.search(r'"type": 22', condition) is not None:
-            text = _('Battle a Team Leader {0} times')
-        elif re.search(r'"type": 23', condition) is not None:
-            text = _('Battle another Trainer {0} times')
+        for con in condition_dict:
+            if con.get('type', 0) == 22:
+                # PVP against team leader.
+                text = _('Battle a Team Leader {0} times')
+            elif con.get('type') == 23:
+                gotta_win = con.get('with_pvp_combat', {}).get('requires_win') is True
+
+                if gotta_win:
+                    text = _('Win a battle against another Trainer {0} times')
+                else:
+                    text = _('Battle another Trainer {0} times')
+
+                in_go_battle_league = any(
+                    x in con.get('with_pvp_combat', {}).get('combat_league_template_id', []) for x in
+                    ["COMBAT_LEAGUE_VS_SEEKER_GREAT", "COMBAT_LEAGUE_VS_SEEKER_ULTRA",
+                     "COMBAT_LEAGUE_VS_SEEKER_MASTER"])
+                vs_player = any(
+                    x in con.get('with_pvp_combat', {}).get('combat_league_template_id', []) for x in
+                    ["COMBAT_LEAGUE_DEFAULT_GREAT", "COMBAT_LEAGUE_DEFAULT_ULTRA",
+                     "COMBAT_LEAGUE_DEFAULT_MASTER"])
+                if not vs_player and in_go_battle_league and gotta_win:
+                    text = _('Win in the GO Battle League {0} times')
+                elif in_go_battle_league and not vs_player:
+                    text = _('Battle in the GO Battle League {0} times')
     elif typeid == 28:
         # Take snapshots quest
         if re.search(r'"type": 28', condition) is not None:
@@ -329,7 +354,6 @@ def questtask(typeid, condition, target, quest_template):
                         cur += 1
     elif typeid == 29:
         # QUEST_BATTLE_TEAM_ROCKET Team Go rucket grunt batles.
-        # Condition type 27 means against a grunt leader WITH_INVASION_CHARACTER= 1
         if int(target) == int(1):
             text = _('Battle a Team Rocket Grunt')
 

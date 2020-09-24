@@ -11,9 +11,9 @@
 <script type="text/javascript" src="static/js/jquery.flot.axislabels.js"></script>
 <script type="text/javascript" src="https://cdn.datatables.net/buttons/1.5.6/js/dataTables.buttons.min.js"></script>
 <script type="text/javascript" src="https://cdn.datatables.net/buttons/1.5.6/js/buttons.flash.min.js"></script>
-<script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.1.3/jszip.min.js"></script>
-<script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.1.53/pdfmake.min.js"></script>
-<script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.1.53/vfs_fonts.js"></script>
+<script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.2.0/jszip.min.js"></script>
+<script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.1.68/pdfmake.min.js"></script>
+<script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.1.68/vfs_fonts.js"></script>
 <script type="text/javascript" src="https://cdn.datatables.net/buttons/1.5.6/js/buttons.html5.min.js"></script>
 <script>
 
@@ -108,7 +108,7 @@
             }
         };
 
-        $.blockUI({ message: '<img src="{{ url_for('static', filename='loading.gif').lstrip('/') }}" width="100px" /><br /><h2>Load...</h2>' });
+        loadingBlockUI("Loading");
 
         $.ajax({
             "url": "get_game_stats?minutes_spawn={{ minutes_spawn }}&minutes_usage={{ minutes_usage }}",
@@ -116,10 +116,7 @@
             "cache": false,
             "dataType": "json",
             success: function (result) {
-
-                quest = result.quest
                 gym = result.gym
-                stop = result.stop
                 usage = result.usage
                 detection = result.detection
                 detection_empty = result.detection_empty
@@ -229,16 +226,6 @@
                 );
                 $("#flot_usage").UseTooltipFull();
 
-                $.plot($("#flot_quest"), [
-                    {
-                        data: quest,
-                        color: "#5482FF",
-                        label: "Quest / Hour"
-                    }
-                ], options_bars);
-                $("#flot_quest").UseTooltip();
-
-                $.plot($("#flot_stop"), stop, options_pie);
                 $.plot($("#flot_gym"), gym, options_pie);
 
             },
@@ -351,6 +338,7 @@
             "columns": columns,
             "ordering": true, "order": [],
             "columnDefs": defs,
+            "deferRender": true,
             "responsive": {{ responsive }},
             "lengthMenu": [ [10, 25, 50, 100, -1], [10, 25, 50, 100, "All"] ],
             dom: 'Blfrtip',
@@ -443,13 +431,6 @@
     </div>
 <div id="legendContainer_usage"></div>
 <div id="flot_usage"></div>
-<br>
-<h2>Today Quest Statistics</h2>
-<div id="legendContainer_quest"></div>
-<div id="flot_quest"></div>
-<br>
-<h2>Stop / Quest Statistics</h2>
-<div id="flot_stop"></div>
 <br>
 <h2>Live Gym Statistics</h2>
 <div id="flot_gym"></div>

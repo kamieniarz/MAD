@@ -8,15 +8,15 @@ from enum import Enum
 from multiprocessing import Queue, Event
 from queue import Empty
 from threading import RLock, Thread
-
-import requests
-
-from mapadroid.utils import apk_util
-from mapadroid.utils import global_variables
-from mapadroid.utils.logging import logger
+from mapadroid.utils.logging import get_logger, LoggerEnums
+from mapadroid.mad_apk import AbstractAPKStorage, is_newer_version, APKType, file_generator, lookup_arch_enum, \
+    APKPackage, APKArch, supported_pogo_version, MADPackages
 
 
-class jobType(Enum):
+logger = get_logger(LoggerEnums.utils)
+
+
+class JobType(Enum):
     INSTALLATION = 0
     REBOOT = 1
     RESTART = 2
@@ -27,7 +27,7 @@ class jobType(Enum):
     CHAIN = 99
 
 
-class jobReturn(Enum):
+class JobReturn(Enum):
     UNKNOWN = 0
     SUCCESS = 1
     NOCONNECT = 2
@@ -37,15 +37,16 @@ class jobReturn(Enum):
     NOT_SUPPORTED = 6
 
 
-SUCCESS_STATES = [jobReturn.SUCCESS, jobReturn.NOT_REQUIRED, jobReturn.NOT_SUPPORTED]
+SUCCESS_STATES = [JobReturn.SUCCESS, JobReturn.NOT_REQUIRED, JobReturn.NOT_SUPPORTED]
 
 
-class deviceUpdater(object):
-    def __init__(self, websocket, args, returning, db):
+class DeviceUpdater(object):
+    def __init__(self, websocket, args, returning, db, storage_obj: AbstractAPKStorage):
         self._websocket = websocket
         self._update_queue = Queue()
         self._update_mutex = RLock()
         self._db = db
+        self._storage_obj = storage_obj
         self._log = {}
         self._args = args
         self._commands: dict = {}
@@ -53,13 +54,14 @@ class deviceUpdater(object):
         self._current_job_id = []
         self._current_job_device = []
         self._returning = returning
+        self.storage_obj: AbstractAPKStorage = storage_obj
         try:
             if os.path.exists('update_log.json'):
                 with open('update_log.json') as logfile:
                     self._log = json.load(logfile)
         except json.decoder.JSONDecodeError:
-            logger.error('Corrupted update_log.json file found. Deleting the '
-            'file. Please check remaining disk space or disk health.')
+            logger.error('Corrupted update_log.json file found. Deleting the file. Please check remaining disk space '
+                         'or disk health.')
             os.remove('update_log.json')
 
         self.init_jobs()
@@ -69,10 +71,10 @@ class deviceUpdater(object):
         self._stop_updater_threads: Event = Event()
         self.t_updater = []
         for i in range(self._args.job_thread_count):
-            t = Thread(name='apk_updater-{}'.format(str(i)), target=self.process_update_queue, args=(i,))
-            t.daemon = True
-            self.t_updater.append(t)
-            t.start()
+            job_thread = Thread(name='apk_updater-{}'.format(str(i)), target=self.process_update_queue, args=(i,))
+            job_thread.daemon = True
+            self.t_updater.append(job_thread)
+            job_thread.start()
 
     def stop_updater(self):
         self._stop_updater_threads.set()
@@ -87,32 +89,32 @@ class deviceUpdater(object):
 
         # load personal commands
 
-        for file in glob.glob(os.path.join("personal_commands", "*.json")):
+        for command_file in glob.glob(os.path.join("personal_commands", "*.json")):
             try:
-                with open(file) as personal_command:
+                with open(command_file) as personal_command:
                     peronal_cmd = json.loads(personal_command.read())
                 for command in peronal_cmd:
                     if command in self._commands:
-                        logger.error("Command {} already exist - skipping".format(str(command)))
+                        logger.error("Command {} already exist - skipping", command)
                     else:
-                        logger.info('Loading personal command: {}'.format(command))
+                        logger.info('Loading personal command: {}', command)
                         self._commands[command] = peronal_cmd[command]
             except Exception as e:
-                logger.error('Cannot add job {} - Reason: {}'.format(str(file), str(e)))
+                logger.error('Cannot add job {} - Reason: {}', command_file, e)
 
     def return_commands(self):
         return self._commands
 
     @logger.catch()
-    def restart_job(self, id_: int):
-        if (id_) in self._log:
-            origin = self._log[id_]['origin']
-            file_ = self._log[id_]['file']
-            jobtype = self._log[id_]['jobtype']
-            globalid = self._log[id_]['globalid']
-            redo = self._log[id_].get('redo', False)
-            waittime = self._log[id_].get('waittime', 0)
-            jobname = self._log[id_].get('redo', None)
+    def restart_job(self, job_id: int):
+        if (job_id) in self._log:
+            origin = self._log[job_id]['origin']
+            file_ = self._log[job_id]['file']
+            jobtype = self._log[job_id]['jobtype']
+            globalid = self._log[job_id]['globalid']
+            redo = self._log[job_id].get('redo', False)
+            waittime = self._log[job_id].get('waittime', 0)
+            jobname = self._log[job_id].get('redo', None)
 
             if globalid not in self._globaljoblog:
                 self._globaljoblog[globalid] = {}
@@ -123,21 +125,17 @@ class deviceUpdater(object):
                 algo = self.get_job_algo_value(algotyp=self._globaljoblog[globalid].get('algotype',
                                                                                         'flex'),
                                                algovalue=self._globaljoblog[globalid].get('algovalue',
-                                                                                          0)) \
-                       + waittime
+                                                                                          0)) + waittime
 
                 processtime = datetime.timestamp(datetime.now() + timedelta(minutes=algo))
 
-                self.write_status_log(str(id_), field='processingdate', value=processtime)
-                self.add_job(globalid=globalid, origin=origin, file=file_, id_=id_, type=jobtype,
-                             counter=0,
-                             status='future', waittime=waittime, processtime=processtime, redo=redo,
-                             jobname=jobname)
+                self.write_status_log(str(job_id), field='processingdate', value=processtime)
+                self.add_job(globalid, origin, file_, job_id=job_id, type=jobtype, counter=0, status='future',
+                             waittime=waittime, processtime=processtime, redo=redo, jobname=jobname)
 
             else:
-                self.write_status_log(str(id_), field='processingdate', delete=True)
-                self.add_job(globalid=globalid, origin=origin, file=file_, id_=id_, type=jobtype,
-                             status='requeued',
+                self.write_status_log(str(job_id), field='processingdate', delete=True)
+                self.add_job(globalid, origin, file_, job_id=job_id, job_type=jobtype, status='requeued',
                              jobname=jobname)
 
         return True
@@ -148,20 +146,19 @@ class deviceUpdater(object):
             if self._log[job]['status'] in (
                     'pending', 'starting', 'processing', 'not connected', 'future', 'not required') \
                     and not self._log[job].get('auto', False):
-                logger.debug("Cancel job {} - it is outdated".format(str(job)))
+                logger.debug("Cancel job {} - it is outdated", job)
                 self.write_status_log(str(job), field='status', value='cancelled')
             elif self._log[job].get('auto', False):
                 self.write_status_log(str(job), delete=True)
 
     @logger.catch()
     def process_update_queue(self, threadnumber):
-        logger.info("Starting Device Job processor thread No {}".format(str(threadnumber)))
+        logger.info("Starting device job processor thread No {}", threadnumber)
         time.sleep(10)
         while not self._stop_updater_threads.is_set():
             try:
-                jobstatus = jobReturn.UNKNOWN
+                jobstatus = JobReturn.UNKNOWN
                 try:
-                    # item = self._update_queue.get()
                     item = self._update_queue.get_nowait()
                 except Empty:
                     time.sleep(1)
@@ -173,26 +170,26 @@ class deviceUpdater(object):
                 if item not in self._log:
                     continue
 
-                id_ = item
-                origin = self._log[str(id_)]['origin']
+                job_id = item
+                origin = self._log[str(job_id)]['origin']
 
                 self._update_mutex.acquire()
                 try:
                     if origin in self._current_job_device:
-                        self._update_queue.put(str(id_))
+                        self._update_queue.put(str(job_id))
                         continue
 
                     self._current_job_device.append(origin)
                 finally:
                     self._update_mutex.release()
 
-                file_ = self._log[str(id_)]['file']
-                counter = self._log[str(id_)]['counter']
-                jobtype = self._log[str(id_)]['jobtype']
-                waittime = self._log[str(id_)].get('waittime', 0)
-                processtime = self._log[str(id_)].get('processingdate', None)
-                globalid = self._log[str(id_)]['globalid']
-                redo = self._log[str(id_)].get('redo', False)
+                file_ = self._log[str(job_id)]['file']
+                counter = self._log[str(job_id)]['counter']
+                jobtype = self._log[str(job_id)]['jobtype']
+                waittime = self._log[str(job_id)].get('waittime', 0)
+                processtime = self._log[str(job_id)].get('processingdate', None)
+                globalid = self._log[str(job_id)]['globalid']
+                redo = self._log[str(job_id)].get('redo', False)
 
                 laststatus = self._globaljoblog[globalid]['laststatus']
                 lastjobid = self._globaljoblog[globalid].get('lastjobid', 0)
@@ -201,32 +198,28 @@ class deviceUpdater(object):
                 if laststatus is not None and laststatus == 'faulty' and \
                         self._globaljoblog[globalid].get('autojob', False):
                     # breakup job because last job in chain is faulty
-                    logger.error(
-                        'Breakup job {} on device {} - File/Job: {} - previous job in chain was broken (ID: {})'
-                            .format(str(jobtype), str(origin), str(file_), str(id_)))
-                    self.write_status_log(str(id_), field='status', value='terminated')
-                    self.send_webhook(id_=id_, status=jobReturn.TERMINATED)
+                    logger.error("Breakup job {} on device {} - File/Job: {} - previous job in chain was broken "
+                                 "(ID: {})", jobtype, origin, file_, job_id)
+                    self.write_status_log(str(job_id), field='status', value='terminated')
+                    self.send_webhook(job_id=job_id, status=JobReturn.TERMINATED)
                     self._current_job_device.remove(origin)
 
                     continue
 
-                if (
-                        laststatus is None or laststatus == 'future') and not startwithinit and processtime is None and \
+                if (laststatus is None or laststatus == 'future') and not startwithinit and processtime is None and \
                         self._globaljoblog[globalid].get('autojob', False):
-                    logger.debug(
-                        'Autjob (no init run) {} on device {} - File/Job: {} - queued to real starttime (ID: {})'
-                            .format(str(jobtype), str(origin), str(file_), str(id_)))
+                    logger.debug("Autjob (no init run) {} on device {} - File/Job: {} - queued to real starttime "
+                                 "(ID: {})", jobtype, origin, file_, job_id)
                     # just schedule job - not process the first time
                     processtime = datetime.timestamp(
                         datetime.now() + timedelta(
                             minutes=self._globaljoblog[globalid].get('algo', 0) + waittime))
-                    self.write_status_log(str(id_), field='processingdate', value=processtime)
+                    self.write_status_log(str(job_id), field='processingdate', value=processtime)
 
-                    self._globaljoblog[globalid]['lastjobid'] = id_
+                    self._globaljoblog[globalid]['lastjobid'] = job_id
                     self._globaljoblog[globalid]['laststatus'] = 'future'
 
-                    self.add_job(globalid=globalid, origin=origin, file=file_, id_=id_, type=jobtype,
-                                 counter=counter,
+                    self.add_job(globalid, origin, file_, job_id=job_id, job_type=jobtype, counter=counter,
                                  status='future', waittime=waittime, processtime=processtime, redo=redo)
 
                     self._current_job_device.remove(origin)
@@ -235,17 +228,16 @@ class deviceUpdater(object):
 
                 if (laststatus is None or laststatus == 'success') and waittime > 0 and processtime is None:
                     # set sleeptime for this job
-                    logger.debug('Job {} on device {} - File/Job: {} - queued to real starttime (ID: {})'
-                                 .format(str(jobtype), str(origin), str(file_), str(id_)))
+                    logger.debug('Job {} on device {} - File/Job: {} - queued to real starttime (ID: {})', jobtype,
+                                 origin, file_, job_id)
 
-                    self._log[str(id_)]['processingdate'] = datetime.timestamp(
+                    self._log[str(job_id)]['processingdate'] = datetime.timestamp(
                         datetime.now() + timedelta(minutes=waittime))
 
-                    self._globaljoblog[globalid]['lastjobid'] = id_
+                    self._globaljoblog[globalid]['lastjobid'] = job_id
                     self._globaljoblog[globalid]['laststatus'] = 'success'
 
-                    self.add_job(globalid=globalid, origin=origin, file=file_, id_=id_, type=jobtype,
-                                 counter=counter,
+                    self.add_job(globalid, origin, file_, job_id=job_id, job_type=jobtype, counter=counter,
                                  status='future', waittime=waittime, processtime=processtime, redo=redo)
 
                     self._current_job_device.remove(origin)
@@ -253,14 +245,12 @@ class deviceUpdater(object):
                     continue
 
                 if laststatus is not None and laststatus in ('pending', 'future', 'failure', 'interrupted',
-                                                             'not connected') and lastjobid != id_ \
+                                                             'not connected') and lastjobid != job_id \
                         and processtime is None:
                     logger.debug('Job {} on device {} - File/Job: {} - queued because last job in jobchain '
-                                 'is not processed till now (ID: {})'
-                                 .format(str(jobtype), str(origin), str(file_), str(id_)))
+                                 'is not processed till now (ID: {})', jobtype, origin, file_, job_id)
                     # skipping because last job in jobchain is not processed till now
-                    self.add_job(globalid=globalid, origin=origin, file=file_, id_=id_, type=jobtype,
-                                 counter=counter,
+                    self.add_job(globalid, origin, file_, job_id=job_id, job_type=jobtype, counter=counter,
                                  status='future', waittime=waittime, processtime=processtime, redo=redo)
 
                     self._current_job_device.remove(origin)
@@ -269,28 +259,24 @@ class deviceUpdater(object):
 
                 if processtime is not None and datetime.fromtimestamp(processtime) > datetime.now():
                     time.sleep(1)
-                    logger.debug(
-                        'Job {} on device {} - File/Job: {} - queued of processtime in future (ID: {})'
-                            .format(str(jobtype), str(origin), str(file_), str(id_)))
-                    self.add_job(globalid=globalid, origin=origin, file=file_, id_=id_, type=jobtype,
-                                 counter=counter,
+                    logger.debug('Job {} on device {} - File/Job: {} - queued of processtime in future (ID: {})',
+                                 str(jobtype), str(origin), str(file_), str(job_id))
+                    self.add_job(globalid, origin, file_, job_id=job_id, job_type=jobtype, counter=counter,
                                  status='future', waittime=waittime, processtime=processtime, redo=redo)
 
                     self._current_job_device.remove(origin)
 
                     continue
 
-                if id_ in self._log:
-                    self._current_job_id.append(id_)
+                if job_id in self._log:
+                    self._current_job_id.append(job_id)
 
-                    if 'processingdate' in self._log[id_]:
-                        self.write_status_log(str(id_), field='processingdate', delete=True)
+                    if 'processingdate' in self._log[job_id]:
+                        self.write_status_log(str(job_id), field='processingdate', delete=True)
 
-                    logger.info(
-                        "Job for {} (File/Job: {}) started (ID: {})".format(str(origin), str(file_),
-                                                                            str(id_)))
-                    self.write_status_log(str(id_), field='status', value='processing')
-                    self.write_status_log(str(id_), field='lastprocess', value=int(time.time()))
+                    logger.info("Job for {} (File/Job: {}) started (ID: {})", origin, file_, job_id)
+                    self.write_status_log(str(job_id), field='status', value='processing')
+                    self.write_status_log(str(job_id), field='lastprocess', value=int(time.time()))
 
                     errorcount = 0
 
@@ -298,115 +284,106 @@ class deviceUpdater(object):
 
                         temp_comm = self._websocket.get_origin_communicator(origin)
 
-                        if temp_comm is None:
+                        if temp_comm is None or temp_comm is False:
                             errorcount += 1
-                            logger.error(
-                                'Cannot start job {} on device {} - File/Job: {} - Device not connected (ID: {})'
-                                    .format(str(jobtype), str(origin), str(file_), str(id_)))
+                            logger.error("Cannot start job {} on device {} - File/Job: {} - Device not connected "
+                                         "(ID: {})", jobtype, origin, file_, job_id)
                             self._globaljoblog[globalid]['laststatus'] = 'not connected'
-                            self.write_status_log(str(id_), field='laststatus', value='not connected')
-                            self._globaljoblog[globalid]['lastjobid'] = id_
-                            jobstatus = jobReturn.NOCONNECT
+                            self.write_status_log(str(job_id), field='laststatus', value='not connected')
+                            self._globaljoblog[globalid]['lastjobid'] = job_id
+                            jobstatus = JobReturn.NOCONNECT
                             time.sleep(5)
 
                         else:
                             # stop worker
                             self._websocket.set_job_activated(origin)
-                            self.write_status_log(str(id_), field='status', value='starting')
+                            self.write_status_log(str(job_id), field='status', value='starting')
                             try:
                                 if self.start_job_type(item, jobtype, temp_comm):
-                                    logger.info(
-                                        'Job {} executed successfully - Device {} - File/Job {} (ID: {})'
-                                            .format(str(jobtype), str(origin), str(file_), str(id_)))
-                                    if self._log[str(id_)]['status'] == 'not required':
-                                        jobstatus = jobReturn.NOT_REQUIRED
-                                    elif self._log[str(id_)]['status'] == 'not supported':
-                                        jobstatus = jobReturn.NOT_SUPPORTED
+                                    logger.info('Job {} executed successfully - Device {} - File/Job {} (ID: {})',
+                                                jobtype, origin, file_, job_id)
+                                    if self._log[str(job_id)]['status'] == 'not required':
+                                        jobstatus = JobReturn.NOT_REQUIRED
+                                    elif self._log[str(job_id)]['status'] == 'not supported':
+                                        jobstatus = JobReturn.NOT_SUPPORTED
                                     else:
-                                        self.write_status_log(str(id_), field='status', value='success')
-                                        jobstatus = jobReturn.SUCCESS
+                                        self.write_status_log(str(job_id), field='status', value='success')
+                                        jobstatus = JobReturn.SUCCESS
                                     self._globaljoblog[globalid]['laststatus'] = 'success'
-                                    self._globaljoblog[globalid]['lastjobid'] = id_
+                                    self._globaljoblog[globalid]['lastjobid'] = job_id
                                 else:
-                                    logger.error(
-                                        'Job {} could not be executed successfully - Device {} - File/Job {} (ID: {})'
-                                            .format(str(jobtype), str(origin), str(file_), str(id_)))
+                                    logger.error("Job {} could not be executed successfully - Device {} - File/Job {} "
+                                                 "(ID: {})", jobtype, origin, file_, job_id)
                                     errorcount += 1
                                     self._globaljoblog[globalid]['laststatus'] = 'failure'
-                                    self.write_status_log(str(id_), field='laststatus', value='failure')
-                                    self._globaljoblog[globalid]['lastjobid'] = id_
-                                    jobstatus = jobReturn.FAILURE
+                                    self.write_status_log(str(job_id), field='laststatus', value='failure')
+                                    self._globaljoblog[globalid]['lastjobid'] = job_id
+                                    jobstatus = JobReturn.FAILURE
 
                                 # start worker
                                 self._websocket.set_job_deactivated(origin)
 
-                            except:
-                                logger.error('Job {} could not be executed successfully (fatal error) '
-                                             '- Device {} - File/Job {} (ID: {})'
-                                             .format(str(jobtype), str(origin), str(file_), str(id_)))
+                            except Exception:
+                                logger.error('Job {} could not be executed successfully (fatal error) - Device {} - '
+                                             'File/Job {} (ID: {})', jobtype, origin, file_, job_id)
                                 errorcount += 1
                                 self._globaljoblog[globalid]['laststatus'] = 'interrupted'
-                                self.write_status_log(str(id_), field='status', value='interrupted')
-                                self._globaljoblog[globalid]['lastjobid'] = id_
-                                jobstatus = jobReturn.FAILURE
+                                self.write_status_log(str(job_id), field='status', value='interrupted')
+                                self._globaljoblog[globalid]['lastjobid'] = job_id
+                                jobstatus = JobReturn.FAILURE
 
                     # check jobstatus and readd if possible
-                    if jobstatus not in SUCCESS_STATES and (jobstatus == jobReturn.NOCONNECT
-                                                            and self._args.job_restart_notconnect == 0):
-                        logger.error(
-                            "Job for {} (File/Job: {} - Type {}) failed 3 times in row - aborting (ID: {})"
-                                .format(str(origin), str(file_), str(jobtype), str(id_)))
+                    if jobstatus not in SUCCESS_STATES and \
+                            (jobstatus == JobReturn.NOCONNECT and self._args.job_restart_notconnect == 0):
+                        logger.error("Job for {} (File/Job: {} - Type {}) failed 3 times in row - aborting (ID: {})",
+                                     origin, file_, jobtype, job_id)
                         self._globaljoblog[globalid]['laststatus'] = 'faulty'
-                        self.write_status_log(str(id_), field='status', value='faulty')
+                        self.write_status_log(job_id, field='status', value='faulty')
 
                         if redo and self._globaljoblog[globalid].get('redoonerror', False):
-                            logger.info('Readd this automatic job for {} (File/Job: {} - Type {})  (ID: {})'
-                                        .format(str(origin), str(file_), str(jobtype), str(id_)))
-                            self.restart_job(id_=id_)
-                            self._globaljoblog[globalid]['lastjobid'] = id_
+                            logger.info('Re-add this automatic job for {} (File/Job: {} - Type {})  (ID: {})',
+                                        origin, file_, jobtype, job_id)
+                            self.restart_job(job_id=job_id)
+                            self._globaljoblog[globalid]['lastjobid'] = job_id
                             self._globaljoblog[globalid]['laststatus'] = 'success'
 
                     elif jobstatus in SUCCESS_STATES and redo:
-                        logger.info('Readd this automatic job for {} (File/Job: {} - Type {})  (ID: {})'
-                                    .format(str(origin), str(file_), str(jobtype), str(id_)))
-                        self.restart_job(id_=id_)
+                        logger.info('Re-add this automatic job for {} (File/Job: {} - Type {})  (ID: {})', origin,
+                                    file_, jobtype, job_id)
+                        self.restart_job(job_id=job_id)
 
-                    elif jobstatus == jobReturn.NOCONNECT and self._args.job_restart_notconnect > 0:
-                        logger.error(
-                            "Job for {} (File/Job: {} - Type {}) failed 3 times in row - requeued it (ID: {})"
-                                .format(str(origin), str(file_), str(jobtype), str(id_)))
+                    elif jobstatus == JobReturn.NOCONNECT and self._args.job_restart_notconnect > 0:
+                        logger.error("Job for {} (File/Job: {} - Type {}) failed 3 times in row - requeued it (ID: {})",
+                                     origin, file_, jobtype, job_id)
                         processtime = datetime.timestamp(
                             datetime.now() + timedelta(minutes=self._args.job_restart_notconnect))
-                        self.write_status_log(str(id_), field='processingdate', value=processtime)
+                        self.write_status_log(str(job_id), field='processingdate', value=processtime)
 
-                        self._globaljoblog[globalid]['lastjobid'] = id_
+                        self._globaljoblog[globalid]['lastjobid'] = job_id
                         self._globaljoblog[globalid]['laststatus'] = 'future'
 
-                        self.add_job(globalid=globalid, origin=origin, file=file_, id_=id_, type=jobtype,
-                                     counter=counter,
+                        self.add_job(globalid, origin, file_, job_id=job_id, job_type=jobtype, counter=counter,
                                      status='future', waittime=waittime, processtime=processtime, redo=redo)
 
-                    self.send_webhook(id_=id_, status=jobstatus)
+                    self.send_webhook(job_id=job_id, status=jobstatus)
 
-                    self._current_job_id.remove(id_)
+                    self._current_job_id.remove(job_id)
                     self._current_job_device.remove(origin)
                     errorcount = 0
                     time.sleep(10)
 
-            except KeyboardInterrupt as e:
-                logger.info("process_update_queue-{} received keyboard interrupt, stopping".format(
-                    (str(threadnumber))))
+            except KeyboardInterrupt:
+                logger.info("process_update_queue-{} received keyboard interrupt, stopping", threadnumber)
                 break
 
             time.sleep(2)
         logger.info("Updater thread stopped")
 
     @logger.catch()
-    def preadd_job(self, origin, job, id_, type, globalid=None):
-        logger.info('Adding Job {} for Device {} - File/Job: {} (ID: {})'
-                    .format(str(type), str(origin), str(job), str(id_)))
+    def preadd_job(self, origin, job, job_id, job_type, globalid=None):
+        logger.info('Adding Job {} for Device {} - File/Job: {} (ID: {})', job_type, origin, job, job_id)
 
-        globalid = globalid if globalid is not None else id_
+        globalid = globalid if globalid is not None else job_id
 
         if globalid not in self._globaljoblog:
             self._globaljoblog[globalid] = {}
@@ -414,61 +391,60 @@ class deviceUpdater(object):
         self._globaljoblog[globalid]['laststatus'] = None
         self._globaljoblog[globalid]['lastjobend'] = None
 
-        if jobType[type.split('.')[1]] == jobType.CHAIN:
+        if JobType[job_type.split('.')[1]] == JobType.CHAIN:
 
             for subjob in self._commands[job]:
-                logger.debug(subjob)
-                self.add_job(globalid=globalid, origin=origin, file=subjob['SYNTAX'], id_=int(time.time()),
-                             type=subjob['TYPE'], waittime=subjob.get('WAITTIME', 0),
+                logger.debug2(subjob)
+                self.add_job(globalid, origin, subjob['SYNTAX'], job_id=int(time.time()),
+                             job_type=subjob['TYPE'], waittime=subjob.get('WAITTIME', 0),
                              redo=self._globaljoblog[globalid].get('redo', False),
                              fieldname=subjob.get('FIELDNAME', 'unknown'), jobname=job)
                 time.sleep(1)
         else:
-            self.add_job(globalid=globalid, origin=origin, file=job, id_=int(id_), type=type)
+            self.add_job(globalid, origin, job, job_id=int(job_id), job_type=job_type)
 
     @logger.catch()
-    def add_job(self, globalid, origin, file, id_: int, type, counter=0, status='pending', waittime=0,
-                processtime=None,
-                redo=False, fieldname=None, jobname=None):
-        if str(id_) not in self._log:
+    def add_job(self, globalid, origin, job, job_id: int, job_type, counter=0, status='pending', waittime=0,
+                processtime=None, redo=False, fieldname=None, jobname=None):
+        if str(job_id) not in self._log:
             log_entry = ({
-                'id': int(id_),
+                'id': int(job_id),
                 'origin': origin,
-                'jobname': jobname if jobname is not None else file,
-                'file': file,
+                'jobname': jobname if jobname is not None else job,
+                'file': job,
                 'status': status,
                 'fieldname': fieldname if fieldname is not None else "unknown",
                 'counter': int(counter),
-                'jobtype': str(type),
+                'jobtype': str(job_type),
                 'globalid': int(globalid),
                 'waittime': waittime,
                 'laststatus': 'init',
                 'redo': redo,
                 'auto': self._globaljoblog[globalid].get('autojob', False)
             })
-            self.write_status_log(str(id_), field=log_entry)
+            self.write_status_log(str(job_id), field=log_entry)
         else:
-            self.write_status_log(str(id_), field='status', value=status)
-            self.write_status_log(str(id_), field='counter', value=counter)
+            self.write_status_log(str(job_id), field='status', value=status)
+            self.write_status_log(str(job_id), field='counter', value=counter)
 
-        self._update_queue.put(str(id_))
+        self._update_queue.put(str(job_id))
 
-    def write_status_log(self, id_, field=None, value=None, delete=False):
+    def write_status_log(self, job_id, field=None, value=None, delete=False):
         self._update_mutex.acquire()
         try:
             if delete:
                 if field is None:
-                    del self._log[str(id_)]
+                    del self._log[str(job_id)]
                 else:
-                    if field in self._log[str(id_)]:
-                        del self._log[str(id_)][field]
+                    if field in self._log[str(job_id)]:
+                        del self._log[str(job_id)][field]
             else:
-                if str(id_) not in self._log:
-                    self._log[str(id_)] = {}
+                if str(job_id) not in self._log:
+                    self._log[str(job_id)] = {}
                 if value is not None:
-                    self._log[str(id_)][field] = value
+                    self._log[str(job_id)][field] = value
                 else:
-                    self._log[str(id_)] = field
+                    self._log[str(job_id)] = field
         finally:
             self._update_mutex.release()
 
@@ -479,9 +455,9 @@ class deviceUpdater(object):
             json.dump(self._log, outfile, indent=4)
 
     @logger.catch()
-    def delete_log_id(self, id_: str):
-        if id_ not in self._current_job_id:
-            self.write_status_log(str(id_), delete=True)
+    def delete_log_id(self, job_id: str):
+        if job_id not in self._current_job_id:
+            self.write_status_log(str(job_id), delete=True)
             return True
         return False
 
@@ -493,82 +469,82 @@ class deviceUpdater(object):
     @logger.catch()
     def start_job_type(self, item, jobtype, ws_conn):
         try:
-            jobtype = jobType[jobtype.split('.')[1]]
-            if jobtype == jobType.INSTALLATION:
+            jobtype = JobType[jobtype.split('.')[1]]
+            if jobtype == JobType.INSTALLATION:
                 file_ = self._log[str(item)]['file']
-                returning = ws_conn.install_apk(300, filepath=os.path.join(self._args.upload_path, file_))
+                if str(file_).lower().endswith(".apk"):
+                    returning = ws_conn.install_apk(300, filepath=os.path.join(self._args.upload_path, file_))
+                elif str(file_).lower().endswith(".zip"):
+                    returning = ws_conn.install_bundle(600, filepath=os.path.join(self._args.upload_path, file_))
+                else:
+                    # unknown filetype
+                    returning = False
                 return returning if not 'RemoteGpsController'.lower() in str(file_).lower() else True
             elif jobtype == jobtype.SMART_UPDATE:
-                package = self._log[str(item)]['file']
-                version_job = "dumpsys package %s | grep versionName" % (package,)
+                package_ver: str = None
+                package_raw = self._log[str(item)]['file']
+                version_job = "dumpsys package %s | grep versionName" % (package_raw,)
                 architecture_job = ws_conn.passthrough('getprop ro.product.cpu.abi')
                 package_ver_job = ws_conn.passthrough(version_job)
                 try:
-                    architecture = re.search(r'\[(\S+)\]', architecture_job).group(1)
-                except:
+                    architecture_raw = re.search(r'\[(\S+)\]', architecture_job).group(1)
+                except AttributeError:
                     logger.warning('Unable to determine the architecture of the device')
                     return False
                 try:
                     package_ver = re.search(r'versionName=([0-9\.]+)', package_ver_job).group(1)
-                except:
-                    logger.warning('Unable to determine version for {}: {}', self._log[str(item)]['file'],
-                                   package_ver_job)
-                    return False
-                mad_apk = apk_util.get_mad_apk(self._db,
-                                               global_variables.MAD_APK_USAGE[self._log[str(item)]['file']],
-                                               architecture=architecture)
-                if not mad_apk or mad_apk['file_id'] is None:
-                    try:
-                        arch = architecture
-                    except:
-                        arch = 'Unknown'
-                    logger.warning('No MAD APK for {} [{}]', package, arch)
-                    return False
-                requires_update = apk_util.is_newer_version(package_ver, mad_apk['version'])
-                # Validate it is supported
-                if package == 'com.nianticlabs.pokemongo':
-                    if architecture == 'armeabi-v7a':
-                        bits = '32'
+                except AttributeError:
+                    if package_ver_job and package_ver_job.split('\n')[0].strip() == 'OK':
+                        logger.info('No information returned.  Assuming package is not installed')
                     else:
-                        bits = '64'
-                    try:
-                        with open('configs/addresses.json') as fh:
-                            address_object = json.load(fh)
-                            composite_key = '%s_%s' % (mad_apk['version'], bits,)
-                            address_object[composite_key]
-                    except KeyError:
-                        try:
-                            requests.get(global_variables.ADDRESSES_GITHUB).json()[composite_key]
-                        except KeyError:
-                            logger.info('Unable to install APK since {} is not supported', composite_key)
-                            self.write_status_log(str(item), field='status', value='not supported')
-                            return True
-                    logger.debug('Supported PoGo version detected')
-                if requires_update is None:
+                        logger.warning('Unable to determine version for {}: {}', self._log[str(item)]['file'],
+                                       package_ver_job)
+                        return False
+                package = getattr(APKType, APKPackage(package_raw).name)
+                architecture = lookup_arch_enum(architecture_raw)
+                package_all: MADPackages = self._storage_obj.get_current_package_info(package)
+                if package_all is None:
+                    logger.warning('No MAD APK for {} [{}]', package, architecture.name)
+                    return False
+                try:
+                    mad_apk = package_all[architecture]
+                except KeyError:
+                    architecture = APKArch.noarch
+                    mad_apk = package_all[architecture.noarch]
+
+                if mad_apk.filename is None:
+                    logger.warning('No MAD APK for {} [{}]', package, architecture.name)
+                    return False
+                # Validate it is supported
+                if package == APKType.pogo:
+                    if not supported_pogo_version(architecture, mad_apk.version):
+                        self.write_status_log(str(item), field='status', value='not supported')
+                        return True
+                if not is_newer_version(mad_apk.version, package_ver):
                     logger.info('Both versions are the same.  No update required')
                     self.write_status_log(str(item), field='status', value='not required')
                     return True
-                elif requires_update is False:
-                    logger.warning('MAD APK for {} is out of date', package)
-                    return False
                 else:
-                    logger.info('Smart Update APK Installation for {} to {}', package,
+                    logger.info('Smart Update APK Installation for {} to {}', package.name,
                                 self._log[str(item)]['origin'])
                     apk_file = bytes()
-                    for chunk in apk_util.chunk_generator(self._db, mad_apk['file_id']):
+                    for chunk in file_generator(self._db, self._storage_obj, package, architecture):
                         apk_file += chunk
-                    returning = ws_conn.install_apk(300, data=apk_file)
+                    if mad_apk.mimetype == 'application/zip':
+                        returning = ws_conn.install_bundle(300, data=apk_file)
+                    else:
+                        returning = ws_conn.install_apk(300, data=apk_file)
                     return returning if not 'RemoteGpsController'.lower() in str(
                         self._log[str(item)]['file']).lower() else True
-            elif jobtype == jobType.REBOOT:
+            elif jobtype == JobType.REBOOT:
                 return ws_conn.reboot()
-            elif jobtype == jobType.RESTART:
+            elif jobtype == JobType.RESTART:
                 return ws_conn.restart_app("com.nianticlabs.pokemongo")
-            elif jobtype == jobType.STOP:
+            elif jobtype == JobType.STOP:
                 return ws_conn.stop_app("com.nianticlabs.pokemongo")
-            elif jobtype == jobType.START:
+            elif jobtype == JobType.START:
                 return ws_conn.start_app("com.nianticlabs.pokemongo")
-            elif jobtype == jobType.PASSTHROUGH:
+            elif jobtype == JobType.PASSTHROUGH:
                 command = self._log[str(item)]['file']
                 returning = ws_conn.passthrough(command).replace('\r', '').replace('\n', '').replace('  ', '')
                 self.write_status_log(str(item), field='returning', value=returning)
@@ -578,8 +554,7 @@ class deviceUpdater(object):
                 return returning if 'KO' not in returning else False
             return False
         except Exception as e:
-            logger.error('Error while getting response from device - Reason: {}'
-                         .format(str(e)))
+            logger.error('Error while getting response from device - Reason: {}', e)
         return False
 
     def delete_log(self, onlysuccess=False):
@@ -591,33 +566,34 @@ class deviceUpdater(object):
 
         else:
             for job in self._log.copy():
-                if not self._log[job].get('redo', False): self.delete_log_id(job)
+                if not self._log[job].get('redo', False):
+                    self.delete_log_id(job)
 
-    def send_webhook(self, id_, status):
-        if not self._log[str(id_)]['auto']:
+    def send_webhook(self, job_id, status):
+        if not self._log[str(job_id)]['auto']:
             return
 
         try:
-            if jobReturn(status).name not in self._args.job_dt_send_type.split(
+            if JobReturn(status).name not in self._args.job_dt_send_type.split(
                     '|') or not self._args.job_dt_wh:
                 return
 
             from discord_webhook import DiscordWebhook, DiscordEmbed
             _webhook = DiscordWebhook(url=self._args.job_dt_wh_url)
 
-            origin = self._log[str(id_)]['origin']
-            file_ = self._log[str(id_)]['file']
-            processtime = self._log[str(id_)].get('processingdate', None)
-            returning = self._log[str(id_)].get('returning', '-')
+            origin = self._log[str(job_id)]['origin']
+            file_ = self._log[str(job_id)]['file']
+            processtime = self._log[str(job_id)].get('processingdate', None)
+            returning = self._log[str(job_id)].get('returning', '-')
 
-            logger.info("Send discord status for device {} (Job: {})".format(str(origin), str(file_)))
+            logger.info("Send discord status for device {} (Job: {})", origin, file_)
 
             embed = DiscordEmbed(title='MAD Job Status', description='Automatic Job processed', color=242424)
             embed.set_author(name='MADBOT')
             embed.add_embed_field(name='Origin', value=origin)
             embed.add_embed_field(name='Jobname', value=file_)
             embed.add_embed_field(name='Retuning', value=returning)
-            embed.add_embed_field(name='Status', value=jobReturn(status).name)
+            embed.add_embed_field(name='Status', value=JobReturn(status).name)
             embed.add_embed_field(name='Next run',
                                   value=str(datetime.fromtimestamp(
                                       processtime) if processtime is not None else "-"))
@@ -625,8 +601,7 @@ class deviceUpdater(object):
             _webhook.execute()
             embed = None
         except Exception as e:
-            logger.error('Cannot send discord webhook for origin {} - Job {} - Reason: {}'.format(
-                str(origin), str(file_), str(e)))
+            logger.error('Cannot send discord webhook for origin {} - Job {} - Reason: {}', origin, file_, e)
 
     def load_automatic_jobs(self):
         self._globaljoblog = {}
@@ -635,7 +610,7 @@ class deviceUpdater(object):
             with open(autocommandfile) as cmdfile:
                 autocommands = json.loads(cmdfile.read())
 
-            logger.info('Found {} autojobs - add them'.format(str(len(autocommands))))
+            logger.info('Found {} autojobs - add them', len(autocommands))
 
             for autocommand in autocommands:
                 origins = autocommand['origins'].split('|')
@@ -658,8 +633,7 @@ class deviceUpdater(object):
                     self._globaljoblog[globalid]['autojob'] = True
                     self._globaljoblog[globalid]['redoonerror'] = autocommand.get('redoonerror', False)
 
-                    self.preadd_job(origin=origin, job=job, id_=int(time.time()),
-                                    type=str(jobType.CHAIN))
+                    self.preadd_job(origin, job, int(time.time()), str(JobType.CHAIN))
                     # get a unique id !
                     time.sleep(1)
         else:

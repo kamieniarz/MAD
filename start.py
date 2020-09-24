@@ -7,7 +7,6 @@ if py_version.major < 3 or (py_version.major == 3 and py_version.minor < 6):
     sys.exit(1)
 from multiprocessing import Process
 from typing import Optional
-
 import calendar
 import datetime
 import gc
@@ -15,29 +14,33 @@ import os
 import pkg_resources
 import time
 from threading import Thread, active_count
-
 import psutil
-
 from mapadroid.utils.MappingManager import MappingManager, MappingManagerManager
-from mapadroid.utils.local_api import LocalAPI
 from mapadroid.db.DbFactory import DbFactory
 from mapadroid.mitm_receiver.MitmMapper import MitmMapper, MitmMapperManager
+from mapadroid.mitm_receiver.MitmDataProcessorManager import MitmDataProcessorManager
 from mapadroid.mitm_receiver.MITMReceiver import MITMReceiver
-from mapadroid.utils.logging import initLogging, logger
 from mapadroid.utils.madGlobals import terminate_mad
 from mapadroid.utils.rarity import Rarity
 from mapadroid.utils.event import Event
 from mapadroid.patcher import MADPatcher
-from mapadroid.utils.walkerArgs import parseArgs
+from mapadroid.utils.walkerArgs import parse_args
 from mapadroid.websocket.WebsocketServer import WebsocketServer
-from mapadroid.utils.updater import deviceUpdater
+from mapadroid.utils.updater import DeviceUpdater
 from mapadroid.data_manager import DataManager
-
+from mapadroid.ocr.pogoWindows import PogoWindows
+from mapadroid.webhook.webhookworker import WebhookWorker
+from mapadroid.mad_apk import get_storage_obj, StorageSyncManager, AbstractAPKStorage
+from mapadroid.madmin.madmin import MADmin
+from mapadroid.utils.pluginBase import PluginCollection
 import unittest
+from mapadroid.utils.logging import init_logging, get_logger, LoggerEnums
 
-args = parseArgs()
+
+args = parse_args()
 os.environ['LANGUAGE'] = args.language
-initLogging(args)
+init_logging(args)
+logger = get_logger(LoggerEnums.system)
 
 
 # Patch to make exceptions in threads cause an exception.
@@ -77,12 +80,12 @@ def install_thread_excepthook():
 
 
 def find_referring_graphs(obj):
-    REFERRERS_TO_IGNORE = [locals(), globals(), gc.garbage]
+    ignore_elems = [locals(), globals(), gc.garbage]
 
-    referrers = (r for r in gc.get_referrers(obj)
-                 if r not in REFERRERS_TO_IGNORE)
+    referrers = (r for r in gc.get_referrers(obj) if r not in ignore_elems)
     for ref in referrers:
-        if isinstance(ref, Graph):
+        print(type(ref))
+        if isinstance(ref, Graph):  # noqa: F821
             # A graph node
             yield ref
         elif isinstance(ref, dict):
@@ -100,9 +103,9 @@ def get_system_infos(db_wrapper):
     while not terminate_mad.is_set():
         logger.debug('Starting internal Cleanup')
         logger.debug('Collecting...')
-        n = gc.collect()
+        unreachable_objs = gc.collect()
         logger.debug('Unreachable objects: {} - Remaining garbage: {} - Running threads: {}',
-                     str(n), str(gc.garbage), str(active_count()))
+                     str(unreachable_objs), str(gc.garbage), str(active_count()))
 
         for obj in gc.garbage:
             for ref in find_referring_graphs(obj):
@@ -114,18 +117,17 @@ def get_system_infos(db_wrapper):
         logger.debug('Clearing gc garbage')
         del gc.garbage[:]
 
-        memoryUse = py.memory_info()[0] / 2. ** 30
-        cpuUse = py.cpu_percent()
-        logger.info('Instance Name: "{}" - Memory usage: {} - CPU usage: {}',
-                    str(args.status_name), str(memoryUse), str(cpuUse))
+        mem_usage = py.memory_info()[0] / 2. ** 30
+        cpu_usage = py.cpu_percent()
+        logger.info('Instance name: "{}" - Memory usage: {:.3f} GB - CPU usage: {}',
+                    str(args.status_name), mem_usage, str(cpu_usage))
         collected = None
         if args.stat_gc:
             collected = gc.collect()
             logger.debug("Garbage collector: collected %d objects." % collected)
         zero = datetime.datetime.utcnow()
         unixnow = calendar.timegm(zero.utctimetuple())
-        db_wrapper.insert_usage(args.status_name, cpuUse,
-                                memoryUse, collected, unixnow)
+        db_wrapper.insert_usage(args.status_name, cpu_usage, mem_usage, collected, unixnow)
         time.sleep(args.statistic_interval)
 
 
@@ -149,143 +151,184 @@ def check_dependencies():
 
 
 if __name__ == "__main__":
+    data_manager: DataManager = None
+    device_updater: DeviceUpdater = None
+    event: Event = None
+    jobstatus: dict = {}
+    mapping_manager_manager: MappingManagerManager = None
+    mapping_manager: Optional[MappingManager] = None
+    mitm_receiver_process: MITMReceiver = None
+    mitm_mapper_manager: Optional[MitmMapperManager] = None
+    mitm_mapper: Optional[MitmMapper] = None
+    pogo_win_manager: Optional[PogoWindows] = None
+    storage_elem: Optional[AbstractAPKStorage] = None
+    storage_manager: Optional[StorageSyncManager] = None
+    t_whw: Thread = None  # Thread for WebHooks
+    t_ws: Thread = None  # Thread - WebSocket Server
+    webhook_worker: Optional[WebhookWorker] = None
+    ws_server: WebsocketServer = None
+    if args.config_mode:
+        logger.info('Starting MAD in config mode')
+    else:
+        logger.info('Starting MAD')
     check_dependencies()
-
     # TODO: globally destroy all threads upon sys.exit() for example
     install_thread_excepthook()
-
-    db_wrapper, db_pool_manager = DbFactory.get_wrapper(args)
-    try:
-        instance_id = db_wrapper.get_instance_id()
-    except:
-        instance_id = None
-    data_manager = DataManager(db_wrapper, instance_id)
-    MADPatcher(args, data_manager)
-    data_manager.clear_on_boot()
-
-    # create folders
     create_folder(args.file_path)
     create_folder(args.upload_path)
-
+    create_folder(args.temp_path)
+    if args.config_mode and args.only_routes:
+        logger.error('Unable to run with config_mode and only_routes.  Only use one option')
+        sys.exit(1)
     if not args.only_scan and not args.only_routes:
         logger.error("No runmode selected. \nAllowed modes:\n"
                      " -os    ---- start scanner/devicecontroller\n"
                      " -or    ---- only calculate routes")
         sys.exit(1)
-
-    mitm_receiver_process = None
-    mitm_mapper_manager = None
-
-    mapping_manager_manager = None
-    mapping_manager: Optional[MappingManager] = None
-    pogoWindowManager = None
-    ws_server = None
-    t_ws = None
-    t_file_watcher = None
-    t_whw = None
-    device_Updater = None
-
-    if args.only_scan or args.only_routes:
-        MappingManagerManager.register('MappingManager', MappingManager)
-        mapping_manager_manager = MappingManagerManager()
-        mapping_manager_manager.start()
-        mapping_manager: MappingManager = mapping_manager_manager.MappingManager(db_wrapper, args,
-                                                                                 data_manager,
-                                                                                 False)
-        filename = args.mappings
-        if args.only_routes:
-            recalc_in_progress = True
-            while recalc_in_progress:
-                time.sleep(5)
-                sql = "SELECT COUNT(*) > 0 FROM `settings_routecalc` WHERE `recalc_status` = 1"
-                recalc_in_progress = db_wrapper.autofetch_value(sql)
-            logger.info("Done calculating routes!")
-            # TODO: shutdown managers properly...
-            sys.exit(0)
-
-        event = Event(args, db_wrapper)
-        event.start_event_checker()
-        # Do not remove this sleep unless you have solved the race condition on boot with the logger
-        time.sleep(.1)
-
-        jobstatus: dict = {}
+    # Elements that should initialized regardless of the functionality being used
+    db_wrapper, db_pool_manager = DbFactory.get_wrapper(args)
+    try:
+        instance_id = db_wrapper.get_instance_id()
+    except Exception:
+        instance_id = None
+    data_manager = DataManager(db_wrapper, instance_id)
+    MADPatcher(args, data_manager)
+    data_manager.clear_on_boot()
+    data_manager.fix_routecalc_on_boot()
+    event = Event(args, db_wrapper)
+    event.start_event_checker()
+    # Do not remove this sleep unless you have solved the race condition on boot with the logger
+    time.sleep(.1)
+    MappingManagerManager.register('MappingManager', MappingManager)
+    mapping_manager_manager = MappingManagerManager()
+    mapping_manager_manager.start()
+    mapping_manager: MappingManager = mapping_manager_manager.MappingManager(db_wrapper,
+                                                                             args,
+                                                                             data_manager,
+                                                                             configmode=args.config_mode)
+    if args.only_routes:
+        logger.info('Running in route recalculation mode. MAD will exit once complete')
+        recalc_in_progress = True
+        while recalc_in_progress:
+            time.sleep(5)
+            sql = "SELECT COUNT(*) > 0 FROM `settings_routecalc` WHERE `recalc_status` = 1"
+            recalc_in_progress = db_wrapper.autofetch_value(sql)
+        logger.info("Done calculating routes!")
+        # TODO: shutdown managers properly...
+        sys.exit(0)
+    (storage_manager, storage_elem) = get_storage_obj(args, db_wrapper)
+    if not args.config_mode:
+        pogo_win_manager = PogoWindows(args.temp_path, args.ocr_thread_count)
         MitmMapperManager.register('MitmMapper', MitmMapper)
         mitm_mapper_manager = MitmMapperManager()
         mitm_mapper_manager.start()
-        mitm_mapper: MitmMapper = mitm_mapper_manager.MitmMapper(mapping_manager, db_wrapper.stats_submit)
+        mitm_mapper = mitm_mapper_manager.MitmMapper(args, mapping_manager, db_wrapper.stats_submit)
 
-        from mapadroid.ocr.pogoWindows import PogoWindows
+    logger.info('Starting PogoDroid Receiver server on port {}'.format(str(args.mitmreceiver_port)))
 
-        pogoWindowManager = PogoWindows(args.temp_path, args.ocr_thread_count)
+    mitm_data_processor_manager = MitmDataProcessorManager(args, mitm_mapper, db_wrapper)
+    mitm_data_processor_manager.launch_processors()
 
-        mitm_receiver_process = MITMReceiver(args.mitmreceiver_ip, int(args.mitmreceiver_port),
-                                             mitm_mapper, args, mapping_manager, db_wrapper,
-                                             data_manager)
-        mitm_receiver_process.start()
+    mitm_receiver_process = MITMReceiver(args.mitmreceiver_ip, int(args.mitmreceiver_port),
+                                         mitm_mapper, args, mapping_manager, db_wrapper,
+                                         data_manager, storage_elem,
+                                         mitm_data_processor_manager.get_queue(),
+                                         enable_configmode=args.config_mode)
+    mitm_receiver_process.start()
 
-        logger.info('Starting websocket server on port {}'.format(str(args.ws_port)))
-        ws_server = WebsocketServer(args, mitm_mapper, db_wrapper, mapping_manager, pogoWindowManager,
-                                    data_manager, event=event)
-        t_ws = Thread(name='scanner', target=ws_server.start_server)
-        t_ws.daemon = False
-        t_ws.start()
-
-        # init jobprocessor
-        device_Updater = deviceUpdater(ws_server, args, jobstatus, db_wrapper)
-
-        webhook_worker = None
+    logger.info('Starting websocket server on port {}'.format(str(args.ws_port)))
+    ws_server = WebsocketServer(args=args,
+                                mitm_mapper=mitm_mapper,
+                                db_wrapper=db_wrapper,
+                                mapping_manager=mapping_manager,
+                                pogo_window_manager=pogo_win_manager,
+                                data_manager=data_manager,
+                                event=event,
+                                enable_configmode=args.config_mode)
+    t_ws = Thread(name='system', target=ws_server.start_server)
+    t_ws.daemon = False
+    t_ws.start()
+    device_updater = DeviceUpdater(ws_server, args, jobstatus, db_wrapper, storage_elem)
+    if not args.config_mode:
         if args.webhook:
-            from mapadroid.webhook.webhookworker import WebhookWorker
-
             rarity = Rarity(args, db_wrapper)
             rarity.start_dynamic_rarity()
-
-            webhook_worker = WebhookWorker(
-                args, data_manager, mapping_manager, rarity, db_wrapper.webhook_reader)
-            t_whw = Thread(name="webhook_worker",
+            webhook_worker = WebhookWorker(args, data_manager, mapping_manager, rarity, db_wrapper.webhook_reader)
+            t_whw = Thread(name="system",
                            target=webhook_worker.run_worker)
             t_whw.daemon = True
             t_whw.start()
-
-    if args.statistic:
-        if args.only_scan:
+        if args.statistic:
             logger.info("Starting statistics collector")
             t_usage = Thread(name='system',
                              target=get_system_infos, args=(db_wrapper,))
             t_usage.daemon = True
             t_usage.start()
 
-    if args.with_madmin:
-        from mapadroid.madmin.madmin import madmin_start
+    madmin = MADmin(args, db_wrapper, ws_server, mapping_manager, data_manager, device_updater, jobstatus, storage_elem)
 
+    # starting plugin system
+    plugin_parts = {
+        'args': args,
+        'data_manager': data_manager,
+        'db_wrapper': db_wrapper,
+        'device_Updater': device_updater,
+        'event': event,
+        'jobstatus': jobstatus,
+        'logger': get_logger(LoggerEnums.plugin),
+        'madmin': madmin,
+        'mapping_manager': mapping_manager,
+        'mitm_mapper': mitm_mapper,
+        'mitm_receiver_process': mitm_receiver_process,
+        'storage_elem': storage_elem,
+        'webhook_worker': webhook_worker,
+        'ws_server': ws_server,
+        'mitm_data_processor_manager': mitm_data_processor_manager
+    }
+    mad_plugins = PluginCollection('plugins', plugin_parts)
+    mad_plugins.apply_all_plugins_on_value()
+
+    if args.with_madmin or args.config_mode:
         logger.info("Starting Madmin on port {}", str(args.madmin_port))
-        t_madmin = Thread(name="madmin", target=madmin_start,
-                          args=(args, db_wrapper, ws_server, mapping_manager, data_manager, device_Updater,
-                                jobstatus))
+        t_madmin = Thread(name="madmin", target=madmin.madmin_start)
         t_madmin.daemon = True
         t_madmin.start()
 
-    logger.info("Running.....")
+    logger.info("MAD is now running.....")
     exit_code = 0
+    device_creator = None
     try:
         if args.unit_tests:
+            from mapadroid.tests.local_api import LocalAPI
             api_ready = False
             api = LocalAPI()
             logger.info('Checking API status')
-            while not api_ready:
+            if not data_manager.get_root_resource('device').keys():
+                from mapadroid.tests.test_utils import ResourceCreator
+                logger.info('Creating a device')
+                device_creator = ResourceCreator(api, prefix='MADCore')
+                res = device_creator.create_valid_resource('device')[0]
+                mapping_manager.update()
+            max_attempts = 30
+            attempt = 0
+            while not api_ready and attempt < max_attempts:
                 try:
                     api.get('/api')
                     api_ready = True
                     logger.info('API is ready for unit testing')
-                except:
+                except Exception:
+                    attempt += 1
                     time.sleep(1)
-            loader = unittest.TestLoader()
-            start_dir = 'mapadroid/tests/'
-            suite = loader.discover(start_dir)
-            runner = unittest.TextTestRunner()
-            result = runner.run(suite)
-            exit_code = 0 if result.wasSuccessful() else 1
-            raise KeyboardInterrupt
+            if api_ready:
+                loader = unittest.TestLoader()
+                start_dir = 'mapadroid/tests/'
+                suite = loader.discover(start_dir)
+                runner = unittest.TextTestRunner()
+                result = runner.run(suite)
+                exit_code = 0 if result.wasSuccessful() else 1
+                raise KeyboardInterrupt
+            else:
+                exit_code = 1
         else:
             while True:
                 time.sleep(10)
@@ -295,20 +338,23 @@ if __name__ == "__main__":
         try:
             db_wrapper = None
             logger.success("Stop called")
+            if device_creator:
+                device_creator.remove_resources()
             terminate_mad.set()
             # now cleanup all threads...
             # TODO: check against args or init variables to None...
             if mitm_receiver_process is not None:
-                # mitm_receiver_thread.kill()
                 logger.info("Trying to stop receiver")
                 mitm_receiver_process.shutdown()
-                logger.debug("MITM child threads successfully shutdown.  Terminating parent thread")
+                logger.debug("MITM child threads successfully shutdown. Terminating parent thread")
                 mitm_receiver_process.terminate()
                 logger.debug("Trying to join MITMReceiver")
                 mitm_receiver_process.join()
                 logger.debug("MITMReceiver joined")
-            if device_Updater is not None:
-                device_Updater.stop_updater()
+            if mitm_data_processor_manager is not None:
+                mitm_data_processor_manager.shutdown()
+            if device_updater is not None:
+                device_updater.stop_updater()
             if t_whw is not None:
                 logger.info("Waiting for webhook-thread to exit")
                 t_whw.join()
@@ -322,11 +368,14 @@ if __name__ == "__main__":
             if mitm_mapper_manager is not None:
                 logger.debug("Calling mitm_mapper shutdown")
                 mitm_mapper_manager.shutdown()
+            if storage_manager is not None:
+                logger.debug('Stopping storage manager')
+                storage_manager.shutdown()
             if db_pool_manager is not None:
                 logger.debug("Calling db_pool_manager shutdown")
                 db_pool_manager.shutdown()
                 logger.debug("Done shutting down db_pool_manager")
-        except:
+        except Exception:
             logger.opt(exception=True).critical("An unhanded exception occurred during shutdown!")
         logger.info("Done shutting down")
         logger.debug(str(sys.exc_info()))

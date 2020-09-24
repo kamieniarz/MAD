@@ -11,7 +11,7 @@ $(document).ready(function () {
     $(".delete").click(function() {
         if(confirm('Are you sure you want to delete this resource?')) {
             var elem =  $(this);
-            $.blockUI({ message: '<img src="{{ url_for('static', filename='loading.gif') }}" width="100px" /><br /><h2>Deleting a {{ subtab }}...</h2>' });
+            loadingBlockUI('Deleting a  {{ subtab }}' );
             $.ajax({
                 url : '{{ base_uri }}/'+ $(this).data('identifier'),
                 type : 'DELETE',
@@ -55,10 +55,8 @@ $(document).ready(function () {
 {{ super() }}
 <div class="row">
   <div class="col">
-    <div class="card border-secondary">
-      <div class="card-body py-2">
-        <p class="card-text">Walkers are used to schedule one or more areas. One walker can be assigned to multiple devices. MAD will make sure devices are dsitributed accordingly to the settings in a walker. Areas in a walker are processed in their order.</p>
-      </div>
+    <div class="alert alert-primary">
+      Walkers are used to schedule one or more areas. One walker can be assigned to multiple devices. MAD will make sure devices are distributed accordingly to the settings in a walker. Areas in a walker are processed in their order.
     </div>
   </div>
 </div>

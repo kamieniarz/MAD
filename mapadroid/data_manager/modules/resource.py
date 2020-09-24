@@ -2,7 +2,11 @@ import copy
 from collections import UserDict
 import mysql
 from ..dm_exceptions import DependencyError, SaveIssue, UnknownIdentifier, UpdateIssue
-from mapadroid.utils.logging import logger
+from ..resource_search import get_search, SearchType
+from mapadroid.utils.logging import get_logger, LoggerEnums
+
+
+logger = get_logger(LoggerEnums.data_manager)
 
 
 USER_READABLE_ERRORS = {
@@ -246,15 +250,15 @@ class Resource(object):
             del kwargs['append']
         except KeyError:
             append = False
-        for d in list(args) + [kwargs]:
-            for k, v in d.items():
-                if type(v) is dict:
-                    self[k].update(v)
+        for update_elems in list(args) + [kwargs]:
+            for update_key, update_val in update_elems.items():
+                if type(update_val) is dict:
+                    self[update_key].update(update_val)
                 else:
-                    if type(v) is list and append:
-                        self[k] += v
+                    if type(update_val) is list and append:
+                        self[update_key] += update_val
                     else:
-                        self[k] = v
+                        self[update_key] = update_val
 
     def _cleanup_load(self):
         try:
@@ -287,6 +291,23 @@ class Resource(object):
         }
         self._dbc.autoexec_delete(self.table, del_data)
 
+    def get_core(self, clear: bool = False):
+        if clear:
+            data = copy.copy(self.get_resource(backend=True))
+        else:
+            data = self.get_resource(backend=True)
+        try:
+            for field, field_value in data['settings'].items():
+                data[field] = field_value
+            for field in data['settings'].removal:
+                data[field] = None
+                del self._data['settings'][field]
+            data['settings'].removal = []
+            del data['settings']
+        except KeyError:
+            pass
+        return data
+
     def get_dependencies(self):
         return []
 
@@ -309,23 +330,22 @@ class Resource(object):
         if not data:
             raise UnknownIdentifier()
         data = self.translate_keys(data, 'load')
-        for field, val in data.items():
+        for field, field_value in data.items():
             if 'settings' in self.configuration and field in self.configuration['settings']:
-                if val is None:
+                if field_value is None:
                     continue
-                self._data['settings'][field] = val
+                self._data['settings'][field] = field_value
             elif field in self.configuration['fields']:
-                self._data['fields'][field] = val
+                self._data['fields'][field] = field_value
 
     def _load_defaults(self):
         sections = ['fields', 'settings']
         for section in sections:
             defaults = {}
             try:
-                for field, val in self.configuration[section].items():
+                for field, default_value in self.configuration[section].items():
                     try:
-                        val['settings']['require'] is True and val['settings']['empty']
-                        defaults[field] = val['settings']['empty']
+                        defaults[field] = default_value['settings']['empty']
                     except KeyError:
                         continue
                 self._data[section] = ResourceTracker(copy.deepcopy(self.configuration[section]), self._data_manager,
@@ -341,14 +361,14 @@ class Resource(object):
         issues = {}
         for top_level in top_levels:
             try:
-                for key, val in self._data[top_level].issues.items():
-                    if key in ignore_issues:
+                for issue_section, issue in self._data[top_level].issues.items():
+                    if issue_section in ignore_issues:
                         continue
-                    if not val:
+                    if not issue:
                         continue
-                    if key not in issues:
-                        issues[key] = []
-                    issues[key] += val
+                    if issue_section not in issues:
+                        issues[issue_section] = []
+                    issues[issue_section] += issue
             except KeyError:
                 continue
         custom_issues = self.validate_custom()
@@ -361,24 +381,14 @@ class Resource(object):
                 elif type(set_issues) is dict:
                     issues[key].update(set_issues)
         if issues:
-            logger.debug('Unable to save the resource {} / {}: {}', self.__class__.__name__, self.identifier,
-                         issues)
+            logger.warning('Unable to save the resource {} / {}: {}', self.__class__.__name__, self.identifier,
+                           issues)
             raise UpdateIssue(**issues)
 
     def save(self, core_data=None, force_insert=False, ignore_issues=[], **kwargs):
         self.presave_validation(ignore_issues=ignore_issues)
         if core_data is None:
-            data = self.get_resource(backend=True)
-            try:
-                for field, val in data['settings'].items():
-                    data[field] = val
-                for field in data['settings'].removal:
-                    data[field] = None
-                    del self._data['settings'][field]
-                data['settings'].removal = []
-                del data['settings']
-            except KeyError:
-                pass
+            data = self.get_core(clear=True)
         else:
             data = core_data
         if self.include_instance_id:
@@ -408,25 +418,49 @@ class Resource(object):
         sql = "SELECT `%s`\n" \
               "FROM `%s`\n" \
               "WHERE `instance_id` = %%s"
-        args = (res_obj.primary_key, res_obj.table,)
+        args = [res_obj.primary_key, res_obj.table, ]
+        param_args = [instance_id]
+        for search_key, search_value in kwargs.items():
+            valid = False
+            search_field, search_type = get_search(search_key)
+            if search_field in cls.configuration['fields']:
+                valid = True
+            if search_field in cls.translations:
+                search_field = cls.translations[search_field]
+                valid = True
+            if valid:
+                if search_type == SearchType.eq:
+                    sql += " AND `%s` = %%s"
+                elif search_type == SearchType.like:
+                    sql += " AND `%s` LIKE %%s"
+                    search_value = "%%{}%%".format(search_value)
+                args.append(search_field)
+                param_args.append(search_value)
         if res_obj.search_field is not None:
             sql += "\nORDER BY `%s` ASC" % (res_obj.search_field)
-        return dbc.autofetch_column(sql % args, args=(instance_id))
+        return dbc.autofetch_column(sql % tuple(args), args=tuple(param_args))
 
     def translate_keys(self, data, operation, translations=None):
-        if translations is None:
-            translations = self.translations
-        if not translations:
-            return data
-        if operation == 'load':
-            translations = dict(map(reversed, translations.items()))
-        translated = {}
-        for key, val in data.items():
-            if key not in translations:
-                translated[key] = val
-                continue
-            translated[translations[key]] = val
-        return translated
+        return translate_frontend_names(self, data, operation, translations=translations)
 
     def validate_custom(self):
         pass
+
+
+def translate_frontend_names(resource, data, operation, translations=None):
+    if translations is None:
+        try:
+            translations = resource.translations
+        except AttributeError:
+            return data
+    if not translations:
+        return data
+    if operation == 'load':
+        translations = dict(map(reversed, translations.items()))
+    translated = {}
+    for elem_name, elem_value in data.items():
+        try:
+            translated[translations[elem_name]] = elem_value
+        except KeyError:
+            translated[elem_name] = elem_value
+    return translated

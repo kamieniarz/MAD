@@ -21,11 +21,15 @@ def memoize(function):
 
 
 @memoize
-def parseArgs():
+def parse_args():
     defaultconfigfiles = []
+    default_tokenfile = None
     if '-cf' not in sys.argv and '--config' not in sys.argv:
         defaultconfigfiles = [os.getenv('MAD_CONFIG', os.path.join(
             mapadroid.MAD_ROOT, 'configs/config.ini'))]
+    if '-td' not in sys.argv and '--token_dispenser' not in sys.argv:
+        default_tokenfile = os.getenv('MAD_CONFIG', os.path.join(
+            mapadroid.MAD_ROOT, 'configs/token-dispensers.ini'))
     parser = configargparse.ArgParser(
         default_config_files=defaultconfigfiles,
         auto_env_var_prefix='THERAIDMAPPER_')
@@ -35,6 +39,7 @@ def parseArgs():
                         default=os.getenv('MAD_CONFIG', os.path.join(mapadroid.MAD_ROOT,
                                                                      'configs/mappings.json')),
                         help='Set mappings file')
+    parser.add_argument('-asi', '--apk_storage_interface', default='fs', help='APK Storage Interface')
 
     # MySQL
     parser.add_argument('-dbm', '--db_method', required=False, default="rm",
@@ -59,6 +64,8 @@ def parseArgs():
                         help='Port to listen on for proto data (MITM data). Default: 8000.')
     parser.add_argument('-mrdw', '--mitmreceiver_data_workers', type=int, default=2,
                         help='Amount of workers to work off the data that queues up. Default: 2.')
+    parser.add_argument('-mipb', '--mitm_ignore_pre_boot', default=False, type=bool,
+                        help='Ignore MITM data having a timestamp pre MAD\'s startup time.')
 
     # WEBSOCKET
     parser.add_argument('-wsip', '--ws_ip', required=False, default="0.0.0.0", type=str,
@@ -107,13 +114,16 @@ def parseArgs():
                         help='Start madmin as instance.')
     parser.add_argument('-or', '--only_routes', action='store_true', default=False,
                         help='Only calculate routes, then exit the program. No scanning.')
+    parser.add_argument('-cm', '--config_mode', action='store_true', default=False,
+                        help='Run in ConfigMode')
 
     # folder
     parser.add_argument('-tmp', '--temp_path', default='temp',
                         help='Temp Folder for OCR Scanning. Default: temp')
 
     parser.add_argument('-upload', '--upload_path', default=os.path.join(mapadroid.MAD_ROOT, 'upload'),
-                        help='Path for uploaded Files via madmin and for device installation. Default: /absolute/path/to/upload')
+                        help='Path for uploaded Files via madmin and for device installation. Default: '
+                             '/absolute/path/to/upload')
 
     parser.add_argument('-pgasset', '--pogoasset', required=False,
                         help=('Path to Pogo Asset.'
@@ -175,7 +185,8 @@ def parseArgs():
                              '- urls have to start with http*')
 
     parser.add_argument('-whea', '--webhook_excluded_areas', default="",
-                        help='Comma-separated list of area names to exclude elements from within to be sent to a webhook')
+                        help='Comma-separated list of area names to exclude elements from within to be sent to a '
+                             'webhook')
     parser.add_argument('-pwh', '--pokemon_webhook', action='store_true', default=False,
                         help='Activate pokemon webhook support')
     parser.add_argument('-pwhn', '--pokemon_webhook_nonivs', action='store_true', default=False,
@@ -274,8 +285,14 @@ def parseArgs():
     parser.add_argument('-ggrs', '--game_stats_raw', action='store_true', default=False,
                         help='Generate worker raw stats (only with --game_stats)')
 
+    parser.add_argument('-gsst', '--game_stats_save_time', default=300, type=int,
+                        help='Number of seconds until worker information is saved to database')
+
     parser.add_argument('-rds', '--raw_delete_shiny', default=0,
                         help='Delete shiny mon in raw stats older then x days (0 =  Disable (Default))')
+
+    parser.add_argument('--quest_stats_fences', default="",
+                        help="Comma separated list of geofences for stop/quest statistics (Empty: all)")
 
     # adb
     parser.add_argument('-adb', '--use_adb', action='store_true', default=False,
@@ -341,15 +358,27 @@ def parseArgs():
     parser.add_argument('-ut', '--unit_tests', action='store_true', default=False,
                         help='Run unit tests then quit', dest='unit_tests')
 
+    # MADAPKs
+    parser.add_argument('-td', '--token_dispenser', default=default_tokenfile,
+                        help='Token dispenser config (MAD)')
+    parser.add_argument('-tdu', '--token_dispenser_user', default='',
+                        help='Token dispenser config (User)')
+    parser.add_argument('-gu', '--gmail_user', default='',
+                        help='Google Mail User for interacting with the Google Play Store')
+    parser.add_argument('-gp', '--gmail_passwd', default='',
+                        help='Google Mail Password for interacting with the Google Play Store.  Must be an app'
+                        ' password or 2fa will be triggered (this should be enabled on your account anyways')
+
+    # Auto-Configuration
+    parser.add_argument('-acna', '--autoconfig_no_auth', action='store_true', default=False,
+                        help='MAD PoGo auth is not required during autoconfiguration',
+                        dest='autoconfig_no_auth')
+
     args = parser.parse_args()
 
     # Allow status name and date formatting in log filename.
     args.log_filename = strftime(args.log_filename)
     args.log_filename = args.log_filename.replace('<sn>', '<SN>')
     args.log_filename = args.log_filename.replace('<SN>', args.status_name)
-
-    args.config_mode = True
-    if sys.argv[0].split('/')[-1] == 'start.py':
-        args.config_mode = False
 
     return args

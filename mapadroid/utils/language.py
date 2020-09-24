@@ -6,7 +6,7 @@ def open_json_file(jsonfile):
     try:
         with open('locale/' + os.environ['LANGUAGE'] + '/' + jsonfile + '.json', encoding='utf8') as f:
             file_open = json.load(f)
-    except:
+    except (OSError, json.decoder.JSONDecodeError):
         with open('locale/en/' + jsonfile + '.json') as f:
             file_open = json.load(f)
 
@@ -22,3 +22,15 @@ def i8ln(word):
             return language_file[word]
 
     return word
+
+
+def get_mon_name(mon_id):
+    mons_file = open_json_file('pokemon')
+    str_id = str(mon_id)
+    if str_id in mons_file:
+        if os.environ['LANGUAGE'] != "en":
+            return i8ln(mons_file[str_id]["name"])
+        else:
+            return mons_file[str_id]["name"]
+    else:
+        return "No-name-in-pokemon-json"
